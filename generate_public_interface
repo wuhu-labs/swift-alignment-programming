@@ -1,0 +1,370 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import pathlib
+import re
+import subprocess
+import sys
+
+IGNORED_INTERFACE_PREFIXES = (
+    "//",
+    "import ",
+    "@_exported",
+    "@_spi",
+    "@_inheritsConvenienceInitializers",
+    "@_hasMissingDesignatedInitializers",
+    "@_originallyDefinedIn",
+    "@available(*, unavailable)",
+    "@available(macOS, unavailable)",
+    "@usableFromInline",
+    "@frozen",
+    "@inlinable",
+)
+
+SYNTHESIZED_INTERFACE_PATTERNS = [
+    re.compile(r"^public func encode\(to "),
+    re.compile(r"^public func hash\(into "),
+    re.compile(r"^public static func == "),
+    re.compile(r"^public init\(from decoder: "),
+    re.compile(r"^public init\?\(rawValue: "),
+    re.compile(r"^public typealias AllCases = "),
+    re.compile(r"^public typealias RawValue = "),
+    re.compile(r"^nonisolated public static var allCases: "),
+    re.compile(r"^public var hashValue: "),
+    re.compile(r"^public var rawValue: "),
+    re.compile(r"^extension .*: (Equatable|Hashable|RawRepresentable) \{\}$"),
+]
+
+PROTOCOL_MEMBER_STARTS = (
+    "var ",
+    "func ",
+    "init",
+    "associatedtype ",
+    "subscript",
+    "typealias ",
+    "static var ",
+    "static func ",
+)
+
+DECLARATION_STARTS = (
+    "public ",
+    "open ",
+    "case ",
+    "extension ",
+)
+
+CONTAINER_KEYWORDS = ("struct", "enum", "protocol", "class", "extension")
+
+
+def collapse_ws(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def strip_module_prefixes(text: str, module: str) -> str:
+    prefixes = [
+        f"{module}.",
+        "Swift.",
+        "Foundation.",
+        "SwiftUICore.",
+        "SwiftUI.",
+        "_Concurrency.",
+    ]
+    for prefix in prefixes:
+        text = text.replace(prefix, "")
+    return text
+
+
+def normalize_swift_text(text: str, module: str) -> str:
+    text = strip_module_prefixes(text, module)
+    text = text.replace("@_Concurrency.MainActor", "@MainActor")
+    text = text.replace("@preconcurrency ", "")
+    text = collapse_ws(text)
+    text = re.sub(r"\s+:\s+", ": ", text)
+    text = re.sub(r"\s+,\s+", ", ", text)
+    text = text.replace("( ", "(")
+    text = text.replace(" )", ")")
+    return text
+
+
+def without_leading_attributes(text: str) -> str:
+    while text.startswith("@"):
+        if text.startswith("@available("):
+            end = text.find(")")
+            if end == -1:
+                break
+            text = text[end + 1 :].strip()
+            continue
+        parts = text.split(" ", 1)
+        if len(parts) == 1:
+            return ""
+        text = parts[1].strip()
+    return text
+
+
+def strip_decl_prefixes(text: str) -> str:
+    text = without_leading_attributes(text)
+    for prefix in ("nonisolated ", "public ", "open "):
+        if text.startswith(prefix):
+            text = text[len(prefix) :]
+    return text
+
+
+def is_synthesized_interface_line(line: str) -> bool:
+    return any(pattern.match(line) for pattern in SYNTHESIZED_INTERFACE_PATTERNS)
+
+
+def leading_spaces(raw_line: str) -> int:
+    return len(raw_line) - len(raw_line.lstrip(" "))
+
+
+def is_container_declaration(text: str) -> bool:
+    core = strip_decl_prefixes(text)
+    return text.endswith("{") and any(core.startswith(f"{keyword} ") for keyword in CONTAINER_KEYWORDS)
+
+
+def container_kind(text: str) -> str | None:
+    core = strip_decl_prefixes(text)
+    for keyword in CONTAINER_KEYWORDS:
+        if core.startswith(f"{keyword} "):
+            return keyword
+    return None
+
+
+def nominal_type_name(text: str) -> str | None:
+    core = strip_decl_prefixes(text)
+    match = re.match(r"(?:struct|enum|protocol|class)\s+([A-Za-z_][A-Za-z0-9_]*)", core)
+    return match.group(1) if match else None
+
+
+def simplify_contextual_type_names(text: str, type_stack: list[str]) -> str:
+    for depth in range(len(type_stack), 0, -1):
+        prefix = ".".join(type_stack[:depth]) + "."
+        text = text.replace(prefix, "")
+    return text
+
+
+def is_kept_declaration(text: str, protocol_depth: int) -> bool:
+    if text == "}":
+        return True
+    core = without_leading_attributes(text)
+    if any(core.startswith(prefix) for prefix in DECLARATION_STARTS):
+        return True
+    if protocol_depth and strip_decl_prefixes(text).startswith(PROTOCOL_MEMBER_STARTS):
+        return True
+    return False
+
+
+def consume_accessor_block(lines: list[str], start: int, module: str) -> tuple[str, int] | None:
+    raw_line = lines[start]
+    declaration = normalize_swift_text(raw_line.strip(), module)
+    if not declaration.endswith("{"):
+        return None
+
+    core = strip_decl_prefixes(declaration)
+    if not core.startswith(("var ", "let ", "static var ", "static let ", "class var ", "subscript", "func ")):
+        return None
+
+    accessors: list[str] = []
+    index = start + 1
+    while index < len(lines):
+        current = collapse_ws(lines[index])
+        if not current:
+            index += 1
+            continue
+        if current in {"get", "set"}:
+            accessors.append(current)
+            index += 1
+            continue
+        if current == "}":
+            rendered = declaration[:-1].rstrip() + " { " + " ".join(accessors) + " }"
+            return rendered, index + 1
+        return None
+    return None
+
+
+def format_output_lines(items: list[tuple[int, str]]) -> list[str]:
+    rendered: list[str] = []
+    previous_nonempty: tuple[int, str] | None = None
+
+    for indent, text in items:
+        if previous_nonempty is not None and text != "}":
+            prev_indent, prev_text = previous_nonempty
+            current_is_attribute = text.startswith("@available(")
+            current_is_container = text.endswith("{") and not text.endswith("{ get }") and not text.endswith("{ get set }")
+            prev_is_attribute = prev_text.startswith("@available(")
+            prev_is_open_brace = prev_text.endswith("{")
+
+            if indent == 0 and not current_is_attribute and not prev_is_attribute and rendered[-1] != "":
+                rendered.append("")
+            elif indent == 0 and current_is_attribute and rendered[-1] != "":
+                rendered.append("")
+            elif indent == prev_indent and current_is_container and not prev_is_open_brace and not prev_is_attribute and rendered[-1] != "":
+                rendered.append("")
+
+        rendered.append(" " * indent + text)
+        previous_nonempty = (indent, text)
+
+    return rendered
+
+
+def render_pseudo_swift(swiftinterface_path: pathlib.Path, module: str) -> str:
+    lines = swiftinterface_path.read_text().splitlines()
+    emitted: list[tuple[int, str]] = []
+    pending_attributes: list[str] = []
+    container_stack: list[tuple[str, str | None]] = []
+    index = 0
+
+    while index < len(lines):
+        raw_line = lines[index]
+        stripped = collapse_ws(raw_line)
+        indent = leading_spaces(raw_line)
+        type_context = [name for _, name in container_stack if name]
+
+        if not stripped:
+            index += 1
+            continue
+        if any(stripped.startswith(prefix) for prefix in IGNORED_INTERFACE_PREFIXES):
+            index += 1
+            continue
+        if stripped.startswith("@available("):
+            pending_attributes.append(normalize_swift_text(stripped, module))
+            index += 1
+            continue
+
+        if stripped == "}":
+            if container_stack:
+                container_stack.pop()
+                emitted.append((indent, "}"))
+            pending_attributes.clear()
+            index += 1
+            continue
+
+        accessor_block = consume_accessor_block(lines, index, module)
+        if accessor_block is not None:
+            rendered, next_index = accessor_block
+            rendered = simplify_contextual_type_names(rendered, type_context)
+            if is_synthesized_interface_line(rendered):
+                pending_attributes.clear()
+                index = next_index
+                continue
+            protocol_depth = 1 if any(kind == "protocol" for kind, _ in container_stack) else 0
+            if is_kept_declaration(rendered, protocol_depth):
+                for attribute in pending_attributes:
+                    emitted.append((indent, attribute))
+                emitted.append((indent, rendered))
+            pending_attributes.clear()
+            index = next_index
+            continue
+
+        cleaned = normalize_swift_text(stripped, module)
+        cleaned = simplify_contextual_type_names(cleaned, type_context)
+        if is_synthesized_interface_line(cleaned):
+            pending_attributes.clear()
+            index += 1
+            continue
+
+        protocol_depth = 1 if any(kind == "protocol" for kind, _ in container_stack) else 0
+        if is_kept_declaration(cleaned, protocol_depth):
+            for attribute in pending_attributes:
+                emitted.append((indent, attribute))
+            emitted.append((indent, cleaned))
+            if is_container_declaration(cleaned):
+                kind = container_kind(cleaned)
+                if kind is not None:
+                    container_stack.append((kind, nominal_type_name(cleaned)))
+        pending_attributes.clear()
+        index += 1
+
+    formatted = format_output_lines(emitted)
+    return "\n".join([f"// {module} public API outline", ""] + formatted + [""])
+
+
+def build_swiftinterface(package_path: pathlib.Path, target: str, verbose_build: bool) -> pathlib.Path:
+    artifact_dir = package_path / ".build" / "public-interface-artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    swiftinterface_path = artifact_dir / f"{target}.swiftinterface"
+
+    command = [
+        "swift",
+        "build",
+        "--package-path",
+        str(package_path),
+        "--target",
+        target,
+        "-Xswiftc",
+        "-enable-library-evolution",
+        "-Xswiftc",
+        "-emit-module-interface-path",
+        "-Xswiftc",
+        str(swiftinterface_path),
+    ]
+
+    result = subprocess.run(command, text=True, capture_output=True)
+    if verbose_build:
+        if result.stdout:
+            print(result.stdout, end="", file=sys.stderr)
+        if result.stderr:
+            print(result.stderr, end="", file=sys.stderr)
+    if result.returncode != 0:
+        if not verbose_build:
+            if result.stdout:
+                print(result.stdout, end="", file=sys.stderr)
+            if result.stderr:
+                print(result.stderr, end="", file=sys.stderr)
+        raise subprocess.CalledProcessError(result.returncode, command)
+    if not swiftinterface_path.exists():
+        raise FileNotFoundError(f"Swift interface was not generated at {swiftinterface_path}")
+    return swiftinterface_path
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Generate a readable pseudo-Swift public interface for a SwiftPM target."
+    )
+    parser.add_argument("--target", required=True, help="SwiftPM target name")
+    parser.add_argument(
+        "--package-path",
+        default=".",
+        help="Path to the Swift package root (defaults to current directory)",
+    )
+    parser.add_argument(
+        "--output",
+        help="Write the rendered pseudo-Swift interface to this file instead of stdout",
+    )
+    parser.add_argument(
+        "--print-swiftinterface-path",
+        action="store_true",
+        help="Also print the generated raw .swiftinterface path to stderr",
+    )
+    parser.add_argument(
+        "--verbose-build",
+        action="store_true",
+        help="Print underlying swift build output to stderr",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    package_path = pathlib.Path(args.package_path).resolve()
+    swiftinterface_path = build_swiftinterface(package_path, args.target, args.verbose_build)
+    rendered = render_pseudo_swift(swiftinterface_path, args.target)
+
+    if args.print_swiftinterface_path:
+        print(swiftinterface_path, file=sys.stderr)
+
+    if args.output:
+        output_path = pathlib.Path(args.output)
+        if not output_path.is_absolute():
+            output_path = package_path / output_path
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(rendered)
+    else:
+        sys.stdout.write(rendered)
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
