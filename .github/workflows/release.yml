@@ -1,0 +1,70 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - '*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    name: Build macOS (arm64)
+    runs-on: [self-hosted, macOS, build]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build release
+        run: swift build -c release --product alignment -q
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: alignment-macos-arm64
+          path: .build/release/alignment
+          if-no-files-found: error
+          retention-days: 1
+
+  build-linux:
+    name: Build Linux (amd64)
+    runs-on: [self-hosted, linux]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build release
+        run: swift build -c release --product alignment -q
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: alignment-linux-amd64
+          path: .build/release/alignment
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    name: Create Release
+    needs: [build-macos, build-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: alignment-macos-arm64
+          path: artifacts/macos
+
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: alignment-linux-amd64
+          path: artifacts/linux
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "alignment ${{ github.ref_name }}"
+          files: |
+            artifacts/macos/alignment
+            artifacts/linux/alignment
+          generate_release_notes: true

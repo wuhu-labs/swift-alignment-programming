@@ -99,13 +99,15 @@ private func buildSymbolGraph(packagePath: URL, target: String) throws -> URL {
     }
 
     let process = Process()
+#if os(Linux)
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/swift")
+    var args = ["build"]
+#else
     process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
-
-    // Detect build system: Xcode-style layout uses swiftbuild
     let buildSystem = detectBuildSystem(packagePath: packagePath)
-    let args = [
-        "swift", "build",
-        "--build-system", buildSystem,
+    var args = ["swift", "build", "--build-system", buildSystem]
+#endif
+    args.append(contentsOf: [
         "--package-path", packagePath.path,
         "--target", target,
         "-Xswiftc", "-emit-symbol-graph",
@@ -113,7 +115,7 @@ private func buildSymbolGraph(packagePath: URL, target: String) throws -> URL {
         "-Xswiftc", artifactDir.path,
         "-Xswiftc", "-symbol-graph-minimum-access-level",
         "-Xswiftc", "public",
-    ]
+    ])
     process.arguments = args
 
     // Create temp output files
@@ -155,6 +157,7 @@ private func buildSymbolGraph(packagePath: URL, target: String) throws -> URL {
     return artifactDir
 }
 
+#if !os(Linux)
 /// Detect whether a package uses the Xcode-style (swiftbuild) or native SPM layout.
 private func detectBuildSystem(packagePath: URL) -> String {
     let fm = FileManager.default
@@ -175,6 +178,7 @@ private func detectBuildSystem(packagePath: URL) -> String {
     }
     return "native"
 }
+#endif
 
 // MARK: - alignment score
 
@@ -336,10 +340,12 @@ struct SnapshotCommand: AsyncParsableCommand {
             print("\nDone! Alignment snapshot at \(outURL.path)")
             print("  overall: \(overallScore.score)% across \(overallScore.totalLOC) LOC")
             if !noOpen {
+#if os(macOS)
                 let process = Process()
                 process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
                 process.arguments = [outURL.appendingPathComponent("index.html").path]
                 try? process.run()
+#endif
             }
         }
     }
@@ -358,8 +364,13 @@ private func findPackageDirs(in root: URL) throws -> [URL] {
 
 private func discoverTargets(in packageDir: URL) throws -> [String] {
     let proc = Process()
+#if os(Linux)
+    proc.executableURL = URL(fileURLWithPath: "/usr/bin/swift")
+    proc.arguments = ["package", "--package-path", packageDir.path, "dump-package"]
+#else
     proc.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
     proc.arguments = ["swift", "package", "--package-path", packageDir.path, "dump-package"]
+#endif
     let pipe = Pipe(); proc.standardOutput = pipe
     try proc.run(); proc.waitUntilExit()
     guard proc.terminationStatus == 0,
