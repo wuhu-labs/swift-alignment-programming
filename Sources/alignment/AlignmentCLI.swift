@@ -35,6 +35,9 @@ struct InterfaceCommand: ParsableCommand {
     @Option(help: "Write the rendered pseudo-Swift interface to this file instead of stdout")
     var output: String?
 
+    @Option(help: "Path to .alignment-sections file for section-based output")
+    var sections: String?
+
     func run() throws {
         let pkgURL = URL(fileURLWithPath: packagePath).standardizedFileURL
 
@@ -45,15 +48,25 @@ struct InterfaceCommand: ParsableCommand {
             sgDir = try buildSymbolGraph(packagePath: pkgURL, target: target)
         }
 
-        let rendered = try renderFromSymbolGraphDirectory(sgDir, module: target)
+        let outline = try buildOutline(from: sgDir, module: target)
 
-        if let outputPath = output {
+        let output: String
+        if let sectionPath = sections {
+            let sectionContent = try String(contentsOfFile: sectionPath, encoding: .utf8)
+            let sectionConfigs = try SectionConfig.parse(sectionContent)
+            let sectioned = assignSections(outline: outline, sections: sectionConfigs)
+            output = sectioned.sectionedText + "\n\n" + sectioned.indexMarkdown
+        } else {
+            output = renderOutline(outline)
+        }
+
+        if let outputPath = self.output {
             let outputURL = URL(fileURLWithPath: outputPath, relativeTo: pkgURL).standardizedFileURL
             try FileManager.default.createDirectory(at: outputURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try rendered.write(to: outputURL, atomically: true, encoding: .utf8)
+            try output.write(to: outputURL, atomically: true, encoding: .utf8)
             print("Wrote interface to \(outputURL.path)")
         } else {
-            print(rendered)
+            print(output)
         }
     }
 }
@@ -68,12 +81,14 @@ private func buildSymbolGraph(packagePath: URL, target: String) throws -> URL {
 
     try? FileManager.default.createDirectory(at: artifactDir, withIntermediateDirectories: true)
 
-    // Clean stale symbol graphs for this target
-    if let files = try? FileManager.default.contentsOfDirectory(at: artifactDir, includingPropertiesForKeys: nil) {
-        for file in files where file.lastPathComponent.hasPrefix("\(target)") && file.pathExtension == "json" {
-            try? FileManager.default.removeItem(at: file)
-        }
+    // Only clean if the source has actually changed (simple check: no symbols at all)
+    let existingSymbols = (try? FileManager.default.contentsOfDirectory(at: artifactDir, includingPropertiesForKeys: nil))
+        .flatMap { $0.filter { $0.lastPathComponent.hasPrefix("\(target)") && $0.pathExtension == "json" } }
+        ?? []
+    if existingSymbols.isEmpty {
+        // No existing symbols — need a full build
     }
+    // Don't clean existing symbols; incremental build will update them if needed
 
     let tmpDir = FileManager.default.temporaryDirectory
     let stdoutFile = tmpDir.appendingPathComponent("alignment-build-out-\(UUID().uuidString).log")
@@ -142,12 +157,22 @@ private func buildSymbolGraph(packagePath: URL, target: String) throws -> URL {
 
 /// Detect whether a package uses the Xcode-style (swiftbuild) or native SPM layout.
 private func detectBuildSystem(packagePath: URL) -> String {
-    // Xcode-style layout: Targets/<Name>/Sources/ (used by WuhuAppKit, WuhuCoreKit)
-    let targetsDir = packagePath.appendingPathComponent("Targets")
-    if FileManager.default.fileExists(atPath: targetsDir.path) {
-        return "swiftbuild"
+    let fm = FileManager.default
+
+    // Check if the package's Package.swift uses custom target paths.
+    // If it does AND we're in a monorepo with xcodegen, use swiftbuild.
+    let pkgSwift = packagePath.appendingPathComponent("Package.swift")
+    let usesCustomPaths = (try? String(contentsOf: pkgSwift, encoding: .utf8))?.contains("path:") ?? false
+    guard usesCustomPaths else { return "native" }
+
+    // Check up to 2 parent levels for a project.yml (xcodegen)
+    var dir = packagePath
+    for _ in 0...2 {
+        if fm.fileExists(atPath: dir.appendingPathComponent("project.yml").path) {
+            return "swiftbuild"
+        }
+        dir = dir.deletingLastPathComponent()
     }
-    // Native SPM: Sources/<Target>/
     return "native"
 }
 

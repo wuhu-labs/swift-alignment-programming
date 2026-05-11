@@ -128,7 +128,7 @@ func memberSortKey(_ declaration: String) -> (Int, String) {
     return (6, declaration.lowercased())
 }
 
-func typeSortKey(_ node: TypeNode) -> (String, String) {
+public func typeSortKey(_ node: TypeNode) -> (String, String) {
     let kindRank: [String: Int] = [
         "swift.protocol": 0, "swift.struct": 1, "swift.enum": 2, "swift.class": 3,
     ]
@@ -330,7 +330,7 @@ func loadSymbols(from symbolGraphDir: URL, module: String) throws -> LoadedSymbo
 
 // MARK: - Outline building
 
-func buildOutline(from symbolGraphDir: URL, module: String) throws -> ModuleOutline {
+public func buildOutline(from symbolGraphDir: URL, module: String) throws -> ModuleOutline {
     let loaded = try loadSymbols(from: symbolGraphDir, module: module)
     var outline = ModuleOutline(module: module)
     var typeNodes: [String: TypeNode] = [:]
@@ -461,7 +461,7 @@ func buildOutline(from symbolGraphDir: URL, module: String) throws -> ModuleOutl
 
 // MARK: - Type rendering
 
-func renderType(_ node: TypeNode, indent: Int = 0) -> [String] {
+public func renderType(_ node: TypeNode, indent: Int = 0) -> [String] {
     var lines: [String] = []
     let prefix = String(repeating: " ", count: indent)
     let baseDeclaration = insertAccessKeyword(node.declaration, accessLevel: node.accessLevel)
@@ -502,7 +502,7 @@ func renderType(_ node: TypeNode, indent: Int = 0) -> [String] {
 
 // MARK: - Outline rendering
 
-func renderOutline(_ outline: ModuleOutline) -> String {
+public func renderOutline(_ outline: ModuleOutline) -> String {
     var lines = ["// \(outline.module) public API outline", ""]
 
     var sections: [[String]] = []
@@ -541,4 +541,9 @@ func renderOutline(_ outline: ModuleOutline) -> String {
 public func renderFromSymbolGraphDirectory(_ symbolGraphDir: URL, module: String) throws -> String {
     let outline = try buildOutline(from: symbolGraphDir, module: module)
     return renderOutline(outline)
+}
+
+/// Build a ModuleOutline from symbol graphs (for programmatic use with sections).
+public func buildOutlineFromSymbolGraphs(_ symbolGraphDir: URL, module: String) throws -> ModuleOutline {
+    try buildOutline(from: symbolGraphDir, module: module)
 }

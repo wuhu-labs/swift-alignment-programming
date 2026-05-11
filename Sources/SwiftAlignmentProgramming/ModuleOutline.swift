@@ -23,21 +23,21 @@ struct ResolvedSymbol {
 }
 
 /// A container type (struct, enum, protocol, class) in the module outline.
-final class TypeNode {
-    let name: String
-    let path: String
-    let accessLevel: String
-    let kindID: String
-    let declaration: String
-    let availability: String?
-    let conformances: [String]
-    let rawType: String?
+public final class TypeNode {
+    public let name: String
+    public let path: String
+    public let accessLevel: String
+    public let kindID: String
+    public let declaration: String
+    public let availability: String?
+    public let conformances: [String]
+    public let rawType: String?
 
-    var childTypes: [TypeNode] = []
-    var cases: [String] = []
-    var members: [String] = []
+    public var childTypes: [TypeNode] = []
+    public var cases: [String] = []
+    public var members: [String] = []
 
-    init(
+    public init(
         name: String,
         path: String,
         accessLevel: String,
@@ -59,37 +59,28 @@ final class TypeNode {
 }
 
 /// A group of extension members with the same header and availability.
-struct ExtensionGroup {
-    let header: String
-    let availability: String?
-    var members: [String]
+public struct ExtensionGroup {
+    public let header: String
+    public let availability: String?
+    public var members: [String]
+
+    public init(header: String, availability: String?, members: [String]) {
+        self.header = header
+        self.availability = availability
+        self.members = members
+    }
 }
 
 /// The complete public API outline for one Swift module.
-struct ModuleOutline {
-    let module: String
-    var typealiases: [String] = []
-    var globals: [String] = []
-    var types: [TypeNode] = []
-    var extensions: [ExtensionGroup] = []
+public struct ModuleOutline {
+    public let module: String
+    public var typealiases: [String] = []
+    public var globals: [String] = []
+    public var types: [TypeNode] = []
+    public var extensions: [ExtensionGroup] = []
+
+    public init(module: String) {
+        self.module = module
+    }
 }
 
-// MARK: - Section Support
-
-/// A parsed section from .alignment-sections configuration.
-struct SectionConfig: Equatable {
-    let name: String
-    let auto: Bool
-    let symbols: [String]
-}
-
-/// A rendered interface organized by sections.
-struct SectionedInterface {
-    let module: String
-    /// Sections in display order. Each section has its config and rendered text lines.
-    let sections: [(config: SectionConfig, items: [String])]
-    /// Full flat interface (for diff compatibility).
-    let fullInterface: String
-    /// Index in markdown format.
-    let indexMarkdown: String
-}

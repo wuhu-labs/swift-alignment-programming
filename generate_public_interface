@@ -1,5 +1,14 @@
-#!/usr/bin/env python3
-from swift_alignment_programming.cli import main
+#!/bin/bash
+# Backward-compatibility wrapper for the old generate_public_interface script.
+# Delegates to `alignment interface`.
+set -euo pipefail
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BIN="$SCRIPT_DIR/.build/debug/alignment"
+
+# Build if needed
+if [ ! -x "$BIN" ]; then
+    (cd "$SCRIPT_DIR" && swift build -q) || exit 1
+fi
+
+exec "$BIN" interface "$@"
