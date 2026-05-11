@@ -180,6 +180,75 @@ private func detectBuildSystem(packagePath: URL) -> String {
 }
 #endif
 
+// MARK: - Whole-package symbol graph build (one build for all targets)
+
+/// Build symbol graphs for ALL targets in a package with a single `swift build`.
+/// This is the key performance optimization — the old Python script did this.
+private func buildAllSymbolGraphs(packagePath: URL) throws -> URL {
+    let artifactDir = packagePath
+        .appendingPathComponent(".build")
+        .appendingPathComponent("public-interface-artifacts")
+        .appendingPathComponent("symbolgraphs")
+
+    try? FileManager.default.createDirectory(at: artifactDir, withIntermediateDirectories: true)
+
+    let tmpDir = FileManager.default.temporaryDirectory
+    let stdoutFile = tmpDir.appendingPathComponent("alignment-build-out-\(UUID().uuidString).log")
+    let stderrFile = tmpDir.appendingPathComponent("alignment-build-err-\(UUID().uuidString).log")
+    defer {
+        try? FileManager.default.removeItem(at: stdoutFile)
+        try? FileManager.default.removeItem(at: stderrFile)
+    }
+
+    let process = Process()
+#if os(Linux)
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/swift")
+    var args = ["build"]
+#else
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+    let buildSystem = detectBuildSystem(packagePath: packagePath)
+    var args = ["swift", "build", "--build-system", buildSystem]
+#endif
+    args.append(contentsOf: [
+        "--package-path", packagePath.path,
+        "-Xswiftc", "-emit-symbol-graph",
+        "-Xswiftc", "-emit-symbol-graph-dir",
+        "-Xswiftc", artifactDir.path,
+        "-Xswiftc", "-symbol-graph-minimum-access-level",
+        "-Xswiftc", "public",
+    ])
+    process.arguments = args
+
+    FileManager.default.createFile(atPath: stdoutFile.path, contents: nil)
+    FileManager.default.createFile(atPath: stderrFile.path, contents: nil)
+    guard let outFH = try? FileHandle(forWritingTo: stdoutFile),
+          let errFH = try? FileHandle(forWritingTo: stderrFile) else {
+        throw ValidationError("Failed to create temp files for build output")
+    }
+    process.standardOutput = outFH
+    process.standardError = errFH
+
+    try process.run()
+    process.waitUntilExit()
+
+    try outFH.synchronize()
+    try errFH.synchronize()
+    try outFH.close()
+    try errFH.close()
+
+    if process.terminationStatus != 0 {
+        if let outStr = try? String(contentsOf: stdoutFile, encoding: .utf8), !outStr.isEmpty {
+            FileHandle.standardError.write(Data(outStr.utf8))
+        }
+        if let errStr = try? String(contentsOf: stderrFile, encoding: .utf8), !errStr.isEmpty {
+            FileHandle.standardError.write(Data(errStr.utf8))
+        }
+        throw ExitCode(process.terminationStatus)
+    }
+
+    return artifactDir
+}
+
 // MARK: - alignment score
 
 struct ScoreCommand: ParsableCommand {
@@ -269,7 +338,7 @@ struct SnapshotCommand: AsyncParsableCommand {
         let collector = GradeCollector()
         let statsByTarget = try collector.collect(in: rootURL)
 
-        // Phase 2: Generate interfaces
+        // Phase 2: Generate interfaces — build once per package, render all targets
         var interfaceResults: [String: String] = [:]
         let packageDirs = try findPackageDirs(in: rootURL)
         for pkgDir in packageDirs {
@@ -277,16 +346,23 @@ struct SnapshotCommand: AsyncParsableCommand {
             let pkgInterfacesDir = interfacesDir.appendingPathComponent(packageName)
             try fm.createDirectory(at: pkgInterfacesDir, withIntermediateDirectories: true)
             let targets = try discoverTargets(in: pkgDir)
-            for target in targets {
-                print("  building interfaces for \(packageName)/\(target)…")
-                do {
-                    let sgDir = try buildSymbolGraph(packagePath: pkgDir, target: target)
-                    let rendered = try renderFromSymbolGraphDirectory(sgDir, module: target)
-                    let outFile = pkgInterfacesDir.appendingPathComponent("\(target).swift")
-                    try rendered.write(to: outFile, atomically: true, encoding: .utf8)
-                    interfaceResults["\(packageName)/\(target)"] = rendered
-                } catch {
-                    print("  ⚠ skipped \(target): \(error)")
+            print("  building \(packageName) (\(targets.count) targets)…")
+            do {
+                let sgDir = try buildAllSymbolGraphs(packagePath: pkgDir)
+                for target in targets {
+                    do {
+                        let rendered = try renderFromSymbolGraphDirectory(sgDir, module: target)
+                        let outFile = pkgInterfacesDir.appendingPathComponent("\(target).swift")
+                        try rendered.write(to: outFile, atomically: true, encoding: .utf8)
+                        interfaceResults["\(packageName)/\(target)"] = rendered
+                    } catch {
+                        print("    ⚠ skipped \(target): \(error)")
+                    }
+                }
+            } catch {
+                print("  ⚠ package \(packageName) failed: \(error)")
+                for target in targets {
+                    print("    ⚠ skipped \(target)")
                 }
             }
         }
