@@ -38,7 +38,7 @@ let package = Package(
         .testTarget(
             name: "SwiftAlignmentProgrammingTests",
             dependencies: ["SwiftAlignmentProgramming"],
-            path: "Tests/SwiftAlignmentProgrammingTests"
+            path: "tests/SwiftAlignmentProgrammingTests"
         ),
     ],
     swiftLanguageModes: [.v6]
