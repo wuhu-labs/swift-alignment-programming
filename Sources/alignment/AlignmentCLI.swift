@@ -85,8 +85,12 @@ private func buildSymbolGraph(packagePath: URL, target: String) throws -> URL {
 
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
-    process.arguments = [
+
+    // Detect build system: Xcode-style layout uses swiftbuild
+    let buildSystem = detectBuildSystem(packagePath: packagePath)
+    let args = [
         "swift", "build",
+        "--build-system", buildSystem,
         "--package-path", packagePath.path,
         "--target", target,
         "-Xswiftc", "-emit-symbol-graph",
@@ -95,6 +99,7 @@ private func buildSymbolGraph(packagePath: URL, target: String) throws -> URL {
         "-Xswiftc", "-symbol-graph-minimum-access-level",
         "-Xswiftc", "public",
     ]
+    process.arguments = args
 
     // Create temp output files
     FileManager.default.createFile(atPath: stdoutFile.path, contents: nil)
@@ -133,6 +138,17 @@ private func buildSymbolGraph(packagePath: URL, target: String) throws -> URL {
     }
 
     return artifactDir
+}
+
+/// Detect whether a package uses the Xcode-style (swiftbuild) or native SPM layout.
+private func detectBuildSystem(packagePath: URL) -> String {
+    // Xcode-style layout: Targets/<Name>/Sources/ (used by WuhuAppKit, WuhuCoreKit)
+    let targetsDir = packagePath.appendingPathComponent("Targets")
+    if FileManager.default.fileExists(atPath: targetsDir.path) {
+        return "swiftbuild"
+    }
+    // Native SPM: Sources/<Target>/
+    return "native"
 }
 
 // MARK: - alignment score
