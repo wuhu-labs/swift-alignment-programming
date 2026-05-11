@@ -157,6 +157,92 @@ private func buildSymbolGraph(packagePath: URL, target: String) throws -> URL {
     return artifactDir
 }
 
+// MARK: - Selective clean
+
+/// Remove build artifacts for the package's own targets while keeping
+/// dependency artifacts cached.  This forces recompilation of our code
+/// (fresh symbol graphs) without rebuilding the entire dependency tree.
+private func cleanOwnTargets(packagePath: URL) {
+    let fm = FileManager.default
+    let ownTargets = listOwnTargets(packagePath: packagePath)
+    guard !ownTargets.isEmpty else { return }
+
+    guard let buildDir = findBuildDir(packagePath: packagePath) else { return }
+
+    // Remove build.db so llbuild re-generates its plan
+    let buildDB = packagePath.appendingPathComponent(".build/build.db")
+    try? fm.removeItem(at: buildDB)
+
+    for name in ownTargets {
+        // Per-target object directory
+        let targetBuild = buildDir.appendingPathComponent("\(name).build")
+        if fm.fileExists(atPath: targetBuild.path) {
+            for artifact in (try? fm.contentsOfDirectory(at: targetBuild, includingPropertiesForKeys: nil)) ?? [] {
+                guard !artifact.hasDirectoryPath else { continue }
+                let name = artifact.lastPathComponent
+                let suffixes = [".o", ".d", ".dia", ".swiftdeps", ".priors"]
+                if suffixes.contains(where: { name.hasSuffix($0) })
+                    || name.hasSuffix(".swift.o")
+                    || name.hasSuffix(".swiftmodule.o")
+                    || name.hasSuffix(".emit-module.d")
+                    || name.hasSuffix(".emit-module.dia") {
+                    try? fm.removeItem(at: artifact)
+                }
+            }
+        }
+
+        // Compiled module artifacts
+        let modulesDir = buildDir.appendingPathComponent("Modules")
+        for ext in [".swiftmodule", ".swiftdoc", ".swiftsourceinfo", ".o"] {
+            try? fm.removeItem(at: modulesDir.appendingPathComponent("\(name)\(ext)"))
+        }
+
+        // Linked executable products
+        try? fm.removeItem(at: buildDir.appendingPathComponent(name))
+    }
+}
+
+/// Return every target name defined in the package (all types).
+private func listOwnTargets(packagePath: URL) -> [String] {
+    let proc = Process()
+#if os(Linux)
+    proc.executableURL = URL(fileURLWithPath: "/usr/bin/swift")
+    proc.arguments = ["package", "--package-path", packagePath.path, "dump-package"]
+#else
+    proc.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+    proc.arguments = ["swift", "package", "--package-path", packagePath.path, "dump-package"]
+#endif
+    let pipe = Pipe(); proc.standardOutput = pipe
+    try? proc.run(); proc.waitUntilExit()
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let targets = json["targets"] as? [[String: Any]] else { return [] }
+    return targets.compactMap { $0["name"] as? String }
+}
+
+/// Locate the platform-specific debug build directory.
+private func findBuildDir(packagePath: URL) -> URL? {
+    let dotBuild = packagePath.appendingPathComponent(".build")
+    guard FileManager.default.fileExists(atPath: dotBuild.path) else { return nil }
+
+    // SwiftPM creates a `debug` symlink pointing at the right triple directory
+    let debugLink = dotBuild.appendingPathComponent("debug")
+    if FileManager.default.fileExists(atPath: debugLink.path) {
+        return debugLink.resolvingSymlinksInPath()
+    }
+
+    // Fallback: glob for <triple>/debug
+    if let contents = try? FileManager.default.contentsOfDirectory(at: dotBuild, includingPropertiesForKeys: nil) {
+        for dir in contents where dir.hasDirectoryPath {
+            let debugDir = dir.appendingPathComponent("debug")
+            if FileManager.default.fileExists(atPath: debugDir.path) {
+                return debugDir
+            }
+        }
+    }
+    return nil
+}
+
 #if !os(Linux)
 /// Detect whether a package uses the Xcode-style (swiftbuild) or native SPM layout.
 private func detectBuildSystem(packagePath: URL) -> String {
@@ -191,6 +277,11 @@ private func buildAllSymbolGraphs(packagePath: URL) throws -> URL {
         .appendingPathComponent("symbolgraphs")
 
     try? FileManager.default.createDirectory(at: artifactDir, withIntermediateDirectories: true)
+
+    // Selective clean: remove own-target build artifacts but keep dependencies cached.
+    // This forces recompilation of our code (fresh symbol graphs) without rebuilding
+    // the entire dependency tree (80-90% of build time).
+    cleanOwnTargets(packagePath: packagePath)
 
     let tmpDir = FileManager.default.temporaryDirectory
     let stdoutFile = tmpDir.appendingPathComponent("alignment-build-out-\(UUID().uuidString).log")
