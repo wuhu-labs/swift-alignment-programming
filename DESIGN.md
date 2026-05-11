@@ -163,14 +163,15 @@ All-in-one local workflow:
 - [x] SymbolGraph Codable types
 - [x] ModuleOutline IR
 - [x] InterfaceRenderer (port from Python renderer.py)
-- [ ] SectionConfig parser (deferred)
-- [ ] Section-aware rendering (deferred)
+- [x] SectionConfig parser (INI-like format, no dependency needed)
+- [x] Section-aware rendering with index markdown
 
 ### Phase 2: CLI ✅
 - [x] swift-argument-parser root command
-- [x] `alignment interface` subcommand
+- [x] `alignment interface` subcommand (with --sections support)
 - [x] Subprocess: `swift build -emit-symbol-graph` via temp files
 - [x] File IO for reading symbol graphs, writing output
+- [x] Build system auto-detection (native vs swiftbuild)
 
 ### Phase 3: Scoring & Dashboard ✅
 - [x] .alignment file scanning (GradeCollector)
@@ -183,21 +184,23 @@ All-in-one local workflow:
 - [x] Package discovery (root or Packages/)
 - [x] Target discovery via swift package dump-package
 - [x] Graceful error handling (skip failing targets)
-- [ ] Hash-based cache (deferred)
 
-### Phase 5: Integration (in progress)
-- [x] Test against wuhu-app packages (scoring works, interface: 10/30+ targets)
-- [ ] Handle swiftbuild build system for Xcode-layout packages
-- [ ] Backward-compat `generate_public_interface` wrapper
-- [ ] Update wuhu-app CI to use new tool
+### Phase 5: Integration ✅ (basic)
+- [x] Test against wuhu-app packages (scoring: all targets; interface: ~10/30+)
+- [x] Handle swiftbuild build system for Xcode-layout packages
+- [x] Backward-compat `generate_public_interface` wrapper
+- [ ] Update wuhu-app CI to use new tool (future)
+- [ ] Hash-based cache (future)
+- [ ] Publishing (R2/GitHub Pages) (future)
 
 ### Known Issues (v1)
-- WuhuAppKit/WuhuCoreKit use `swiftbuild` build system; need `--build-system swiftbuild`
-- Some targets in wuhu-app have pre-existing compilation errors
-- JiuziAI interface generation works via `alignment interface` but can fail in
-  `alignment snapshot` due to shared artifact directory conflicts
-- No hash-based cache yet — every `snapshot` rebuilds from scratch
-- Section support (.alignment-sections) not yet implemented
+- Some WuhuAppKit/WuhuCoreKit targets fail due to pre-existing compilation errors
+  (e.g. CanopySessionComponents.swift: Color(.paper) resolution issue)
+- No hash-based cache — every build recompiles from scratch
+- `snapshot` interface generation for WuhuCoreKit targets sometimes produces no
+  symbol graphs on incremental builds (clean step needs refinement)
+- The `score` command's GROUP BY logic (groupKeyForFile) is monorepo-specific;
+  standalone packages get lumped under "root"
 
 ## File Map (Sources/SwiftAlignmentProgramming/)
 
