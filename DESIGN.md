@@ -159,34 +159,45 @@ All-in-one local workflow:
 
 ## Implementation Plan
 
-### Phase 1: Library Core
-- [ ] SymbolGraph Codable types
-- [ ] ModuleOutline IR
-- [ ] InterfaceRenderer (port from Python renderer.py)
-- [ ] SectionConfig parser
-- [ ] Section-aware rendering
+### Phase 1: Library Core ✅
+- [x] SymbolGraph Codable types
+- [x] ModuleOutline IR
+- [x] InterfaceRenderer (port from Python renderer.py)
+- [ ] SectionConfig parser (deferred)
+- [ ] Section-aware rendering (deferred)
 
-### Phase 2: CLI
-- [ ] swift-argument-parser root command
-- [ ] `alignment interface` subcommand
-- [ ] Subprocess: `swift build -emit-symbol-graph`
-- [ ] File IO for reading symbol graphs, writing output
+### Phase 2: CLI ✅
+- [x] swift-argument-parser root command
+- [x] `alignment interface` subcommand
+- [x] Subprocess: `swift build -emit-symbol-graph` via temp files
+- [x] File IO for reading symbol graphs, writing output
 
-### Phase 3: Scoring & Dashboard
-- [ ] .alignment file scanning
-- [ ] AlignmentScore computation
-- [ ] SVG bar generation
-- [ ] Dashboard HTML generation
+### Phase 3: Scoring & Dashboard ✅
+- [x] .alignment file scanning (GradeCollector)
+- [x] AlignmentScore computation
+- [x] SVG bar generation
+- [x] Dashboard HTML generation
 
-### Phase 4: Snapshot & Cache
-- [ ] `alignment snapshot` all-in-one command
-- [ ] Hash-based cache with content-addressed keys
-- [ ] Cache read/write/clear
+### Phase 4: Snapshot ✅
+- [x] `alignment snapshot` all-in-one command
+- [x] Package discovery (root or Packages/)
+- [x] Target discovery via swift package dump-package
+- [x] Graceful error handling (skip failing targets)
+- [ ] Hash-based cache (deferred)
 
-### Phase 5: Integration
-- [ ] Test against wuhu-app packages
+### Phase 5: Integration (in progress)
+- [x] Test against wuhu-app packages (scoring works, interface: 10/30+ targets)
+- [ ] Handle swiftbuild build system for Xcode-layout packages
 - [ ] Backward-compat `generate_public_interface` wrapper
 - [ ] Update wuhu-app CI to use new tool
+
+### Known Issues (v1)
+- WuhuAppKit/WuhuCoreKit use `swiftbuild` build system; need `--build-system swiftbuild`
+- Some targets in wuhu-app have pre-existing compilation errors
+- JiuziAI interface generation works via `alignment interface` but can fail in
+  `alignment snapshot` due to shared artifact directory conflicts
+- No hash-based cache yet — every `snapshot` rebuilds from scratch
+- Section support (.alignment-sections) not yet implemented
 
 ## File Map (Sources/SwiftAlignmentProgramming/)
 
