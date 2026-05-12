@@ -340,27 +340,47 @@ struct ScoreCommand: ParsableCommand {
     @Flag(help: "JSON output format")
     var json: Bool = false
 
+    @Flag(help: "Output overall summary instead of per-target breakdown")
+    var summary: Bool = false
+
     func run() throws {
         let rootURL = URL(fileURLWithPath: root).standardizedFileURL
         let collector = GradeCollector()
-
         let statsByTarget = try collector.collect(in: rootURL)
 
         if json || output != nil {
-            var result: [String: Any] = [:]
-            for (target, stats) in statsByTarget {
-                let score = AlignmentScore.compute(from: stats)
+            let data: Data
+            if summary {
+                // Overall format: {"score": N, "total_loc": N, "grades": {...}}
+                let allStats = statsByTarget.values.flatMap { $0 }
+                let score = AlignmentScore.compute(from: allStats)
                 var gradeDict: [String: Int] = [:]
                 for grade in AlignmentGrade.allCases {
                     gradeDict[grade.rawValue] = score.grades[grade, default: 0]
                 }
-                result[target] = [
+                let result: [String: Any] = [
                     "score": score.score,
                     "total_loc": score.totalLOC,
                     "grades": gradeDict,
                 ]
+                data = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
+            } else {
+                // Per-target format: {"Target": {"score": N, "total_loc": N, "grades": {...}}, ...}
+                var result: [String: Any] = [:]
+                for (target, stats) in statsByTarget {
+                    let score = AlignmentScore.compute(from: stats)
+                    var gradeDict: [String: Int] = [:]
+                    for grade in AlignmentGrade.allCases {
+                        gradeDict[grade.rawValue] = score.grades[grade, default: 0]
+                    }
+                    result[target] = [
+                        "score": score.score,
+                        "total_loc": score.totalLOC,
+                        "grades": gradeDict,
+                    ]
+                }
+                data = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
             }
-            let data = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
             if let outputPath = output {
                 try data.write(to: URL(fileURLWithPath: outputPath))
                 print("Wrote score to \(outputPath)")
