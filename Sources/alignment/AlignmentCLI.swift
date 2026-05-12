@@ -10,7 +10,7 @@ struct AlignmentCLI: AsyncParsableCommand {
         subcommands: [
             InterfaceCommand.self,
             ScoreCommand.self,
-            SnapshotCommand.self,
+            DashboardCommand.self,
         ]
     )
 }
@@ -20,11 +20,11 @@ struct AlignmentCLI: AsyncParsableCommand {
 struct InterfaceCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "interface",
-        abstract: "Generate a readable pseudo-Swift public interface for a SwiftPM target"
+        abstract: "Generate a readable pseudo-Swift public interface for a SwiftPM package"
     )
 
-    @Option(help: "SwiftPM target name")
-    var target: String
+    @Option(help: "SwiftPM target name. If omitted, generates interfaces for all non-test targets.")
+    var target: String?
 
     @Option(help: "Path to the Swift package root (defaults to current directory)")
     var packagePath: String = "."
@@ -32,23 +32,44 @@ struct InterfaceCommand: ParsableCommand {
     @Option(help: "Use an existing symbol graph directory instead of building the target")
     var symbolGraphDir: String?
 
-    @Option(help: "Write the rendered pseudo-Swift interface to this file instead of stdout")
+    @Option(help: "Write output to this file (single target) or directory (all targets). Defaults to stdout for single target, .build/alignment-interfaces/ for all targets.")
     var output: String?
 
-    @Option(help: "Path to .alignment-sections file for section-based output")
+    @Option(help: "Path to .alignment-sections file for section-based output (single target only)")
     var sections: String?
+
+    @Option(help: "Build system: native or swiftbuild (default: native)")
+    var buildSystem: String = "native"
+
+    func validate() throws {
+        let valid = ["native", "swiftbuild"]
+        guard valid.contains(buildSystem) else {
+            throw ValidationError("--build-system must be 'native' or 'swiftbuild', got '\(buildSystem)'")
+        }
+        if target == nil && sections != nil {
+            throw ValidationError("--sections can only be used with --target (single target mode)")
+        }
+    }
 
     func run() throws {
         let pkgURL = URL(fileURLWithPath: packagePath).standardizedFileURL
 
+        guard target != nil || symbolGraphDir != nil else {
+            // All-targets mode: build + render every non-test target
+            try runAllTargets(pkgURL: pkgURL)
+            return
+        }
+
+        // Single-target mode
+        let targetName = target!
         let sgDir: URL
         if let dir = symbolGraphDir {
             sgDir = URL(fileURLWithPath: dir).standardizedFileURL
         } else {
-            sgDir = try buildSymbolGraph(packagePath: pkgURL, target: target)
+            sgDir = try buildSymbolGraphs(packagePath: pkgURL, target: targetName, buildSystem: buildSystem)
         }
 
-        let outline = try buildOutline(from: sgDir, module: target)
+        let outline = try buildOutline(from: sgDir, module: targetName)
 
         let output: String
         if let sectionPath = sections {
@@ -69,11 +90,51 @@ struct InterfaceCommand: ParsableCommand {
             print(output)
         }
     }
+
+    private func runAllTargets(pkgURL: URL) throws {
+        let fm = FileManager.default
+        let targets = try listInterfaceTargets(packagePath: pkgURL)
+
+        guard !targets.isEmpty else {
+            print("No interface-eligible targets found in \(pkgURL.path)")
+            return
+        }
+
+        let sgDir = try buildSymbolGraphs(packagePath: pkgURL, target: nil, buildSystem: buildSystem)
+
+        let outputDirURL: URL
+        if let out = output {
+            outputDirURL = URL(fileURLWithPath: out, relativeTo: pkgURL).standardizedFileURL
+        } else {
+            outputDirURL = pkgURL
+                .appendingPathComponent(".build")
+                .appendingPathComponent("alignment-interfaces")
+        }
+        try fm.createDirectory(at: outputDirURL, withIntermediateDirectories: true)
+
+        var successCount = 0
+        var skipCount = 0
+        for target in targets {
+            do {
+                let rendered = try renderFromSymbolGraphDirectory(sgDir, module: target)
+                let outFile = outputDirURL.appendingPathComponent("\(target).swift")
+                try rendered.write(to: outFile, atomically: true, encoding: .utf8)
+                print("  \(target) -> \(outFile.path)")
+                successCount += 1
+            } catch {
+                print("  ⚠ skipped \(target): \(error)")
+                skipCount += 1
+            }
+        }
+        print("Interfaces: \(successCount) generated, \(skipCount) skipped → \(outputDirURL.path)")
+    }
 }
 
-// MARK: - Symbol Graph Building (subprocess)
+// MARK: - Symbol Graph Building
 
-private func buildSymbolGraph(packagePath: URL, target: String) throws -> URL {
+/// Build symbol graphs for a package.  If `target` is nil, builds all targets
+/// in one invocation (no `--target` flag).
+private func buildSymbolGraphs(packagePath: URL, target: String?, buildSystem: String) throws -> URL {
     let artifactDir = packagePath
         .appendingPathComponent(".build")
         .appendingPathComponent("public-interface-artifacts")
@@ -81,14 +142,12 @@ private func buildSymbolGraph(packagePath: URL, target: String) throws -> URL {
 
     try? FileManager.default.createDirectory(at: artifactDir, withIntermediateDirectories: true)
 
-    // Only clean if the source has actually changed (simple check: no symbols at all)
-    let existingSymbols = (try? FileManager.default.contentsOfDirectory(at: artifactDir, includingPropertiesForKeys: nil))
-        .flatMap { $0.filter { $0.lastPathComponent.hasPrefix("\(target)") && $0.pathExtension == "json" } }
-        ?? []
-    if existingSymbols.isEmpty {
-        // No existing symbols — need a full build
+    // Selective clean for native builds: remove own-target artifacts so
+    // the compiler re-emits fresh symbol graphs, while keeping dependency
+    // artifacts cached.
+    if buildSystem == "native" {
+        cleanOwnTargets(packagePath: packagePath)
     }
-    // Don't clean existing symbols; incremental build will update them if needed
 
     let tmpDir = FileManager.default.temporaryDirectory
     let stdoutFile = tmpDir.appendingPathComponent("alignment-build-out-\(UUID().uuidString).log")
@@ -104,12 +163,15 @@ private func buildSymbolGraph(packagePath: URL, target: String) throws -> URL {
     var args = ["build"]
 #else
     process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
-    let buildSystem = detectBuildSystem(packagePath: packagePath)
     var args = ["swift", "build", "--build-system", buildSystem]
 #endif
     args.append(contentsOf: [
         "--package-path", packagePath.path,
-        "--target", target,
+    ])
+    if let target {
+        args.append(contentsOf: ["--target", target])
+    }
+    args.append(contentsOf: [
         "-Xswiftc", "-emit-symbol-graph",
         "-Xswiftc", "-emit-symbol-graph-dir",
         "-Xswiftc", artifactDir.path,
@@ -118,7 +180,6 @@ private func buildSymbolGraph(packagePath: URL, target: String) throws -> URL {
     ])
     process.arguments = args
 
-    // Create temp output files
     FileManager.default.createFile(atPath: stdoutFile.path, contents: nil)
     FileManager.default.createFile(atPath: stderrFile.path, contents: nil)
     guard let outFH = try? FileHandle(forWritingTo: stdoutFile),
@@ -146,25 +207,51 @@ private func buildSymbolGraph(packagePath: URL, target: String) throws -> URL {
         throw ExitCode(process.terminationStatus)
     }
 
+    // Validate: at least one symbol graph was produced
+    let prefix = target ?? ""
     let generated = (try? FileManager.default.contentsOfDirectory(at: artifactDir, includingPropertiesForKeys: nil))
-        .flatMap { $0.filter { $0.lastPathComponent.hasPrefix(target) && $0.pathExtension == "json" } }
+        .flatMap { $0.filter { $0.lastPathComponent.hasPrefix(prefix) && $0.pathExtension == "json" } }
         ?? []
 
     guard !generated.isEmpty else {
-        throw ValidationError("No symbol graph JSON files generated for target \(target) in \(artifactDir.path)")
+        let label = target ?? "<all targets>"
+        throw ValidationError("No symbol graph JSON files generated for \(label) in \(artifactDir.path)")
     }
 
     return artifactDir
 }
 
-// MARK: - Selective clean
+// MARK: - Target discovery
+
+/// Return the names of all non-test SwiftPM targets in a package.
+private func listInterfaceTargets(packagePath: URL) throws -> [String] {
+    let proc = Process()
+#if os(Linux)
+    proc.executableURL = URL(fileURLWithPath: "/usr/bin/swift")
+    proc.arguments = ["package", "--package-path", packagePath.path, "dump-package"]
+#else
+    proc.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+    proc.arguments = ["swift", "package", "--package-path", packagePath.path, "dump-package"]
+#endif
+    let pipe = Pipe(); proc.standardOutput = pipe
+    try proc.run(); proc.waitUntilExit()
+    guard proc.terminationStatus == 0,
+          let json = try JSONSerialization.jsonObject(with: pipe.fileHandleForReading.readDataToEndOfFile()) as? [String: Any],
+          let targets = json["targets"] as? [[String: Any]] else { return [] }
+    let valid: Set<String> = ["regular", "executable", "macro"]
+    return targets.compactMap { t in
+        guard valid.contains(t["type"] as? String ?? ""), let name = t["name"] as? String else { return nil }
+        return name
+    }
+}
+
+// MARK: - Selective clean (native only)
 
 /// Remove build artifacts for the package's own targets while keeping
-/// dependency artifacts cached.  This forces recompilation of our code
-/// (fresh symbol graphs) without rebuilding the entire dependency tree.
+/// dependency artifacts cached.
 private func cleanOwnTargets(packagePath: URL) {
     let fm = FileManager.default
-    let ownTargets = listOwnTargets(packagePath: packagePath)
+    let ownTargets = listAllTargets(packagePath: packagePath)
     guard !ownTargets.isEmpty else { return }
 
     guard let buildDir = findBuildDir(packagePath: packagePath) else { return }
@@ -174,7 +261,6 @@ private func cleanOwnTargets(packagePath: URL) {
     try? fm.removeItem(at: buildDB)
 
     for name in ownTargets {
-        // Per-target object directory
         let targetBuild = buildDir.appendingPathComponent("\(name).build")
         if fm.fileExists(atPath: targetBuild.path) {
             for artifact in (try? fm.contentsOfDirectory(at: targetBuild, includingPropertiesForKeys: nil)) ?? [] {
@@ -191,19 +277,16 @@ private func cleanOwnTargets(packagePath: URL) {
             }
         }
 
-        // Compiled module artifacts
         let modulesDir = buildDir.appendingPathComponent("Modules")
         for ext in [".swiftmodule", ".swiftdoc", ".swiftsourceinfo", ".o"] {
             try? fm.removeItem(at: modulesDir.appendingPathComponent("\(name)\(ext)"))
         }
 
-        // Linked executable products
         try? fm.removeItem(at: buildDir.appendingPathComponent(name))
     }
 }
 
-/// Return every target name defined in the package (all types).
-private func listOwnTargets(packagePath: URL) -> [String] {
+private func listAllTargets(packagePath: URL) -> [String] {
     let proc = Process()
 #if os(Linux)
     proc.executableURL = URL(fileURLWithPath: "/usr/bin/swift")
@@ -220,18 +303,15 @@ private func listOwnTargets(packagePath: URL) -> [String] {
     return targets.compactMap { $0["name"] as? String }
 }
 
-/// Locate the platform-specific debug build directory.
 private func findBuildDir(packagePath: URL) -> URL? {
     let dotBuild = packagePath.appendingPathComponent(".build")
     guard FileManager.default.fileExists(atPath: dotBuild.path) else { return nil }
 
-    // SwiftPM creates a `debug` symlink pointing at the right triple directory
     let debugLink = dotBuild.appendingPathComponent("debug")
     if FileManager.default.fileExists(atPath: debugLink.path) {
         return debugLink.resolvingSymlinksInPath()
     }
 
-    // Fallback: glob for <triple>/debug
     if let contents = try? FileManager.default.contentsOfDirectory(at: dotBuild, includingPropertiesForKeys: nil) {
         for dir in contents where dir.hasDirectoryPath {
             let debugDir = dir.appendingPathComponent("debug")
@@ -241,103 +321,6 @@ private func findBuildDir(packagePath: URL) -> URL? {
         }
     }
     return nil
-}
-
-#if !os(Linux)
-/// Detect whether a package uses the Xcode-style (swiftbuild) or native SPM layout.
-private func detectBuildSystem(packagePath: URL) -> String {
-    let fm = FileManager.default
-
-    // Check if the package's Package.swift uses custom target paths.
-    // If it does AND we're in a monorepo with xcodegen, use swiftbuild.
-    let pkgSwift = packagePath.appendingPathComponent("Package.swift")
-    let usesCustomPaths = (try? String(contentsOf: pkgSwift, encoding: .utf8))?.contains("path:") ?? false
-    guard usesCustomPaths else { return "native" }
-
-    // Check up to 2 parent levels for a project.yml (xcodegen)
-    var dir = packagePath
-    for _ in 0...2 {
-        if fm.fileExists(atPath: dir.appendingPathComponent("project.yml").path) {
-            return "swiftbuild"
-        }
-        dir = dir.deletingLastPathComponent()
-    }
-    return "native"
-}
-#endif
-
-// MARK: - Whole-package symbol graph build (one build for all targets)
-
-/// Build symbol graphs for ALL targets in a package with a single `swift build`.
-/// This is the key performance optimization — the old Python script did this.
-private func buildAllSymbolGraphs(packagePath: URL) throws -> URL {
-    let artifactDir = packagePath
-        .appendingPathComponent(".build")
-        .appendingPathComponent("public-interface-artifacts")
-        .appendingPathComponent("symbolgraphs")
-
-    try? FileManager.default.createDirectory(at: artifactDir, withIntermediateDirectories: true)
-
-    // Selective clean: remove own-target build artifacts but keep dependencies cached.
-    // This forces recompilation of our code (fresh symbol graphs) without rebuilding
-    // the entire dependency tree (80-90% of build time).
-    cleanOwnTargets(packagePath: packagePath)
-
-    let tmpDir = FileManager.default.temporaryDirectory
-    let stdoutFile = tmpDir.appendingPathComponent("alignment-build-out-\(UUID().uuidString).log")
-    let stderrFile = tmpDir.appendingPathComponent("alignment-build-err-\(UUID().uuidString).log")
-    defer {
-        try? FileManager.default.removeItem(at: stdoutFile)
-        try? FileManager.default.removeItem(at: stderrFile)
-    }
-
-    let process = Process()
-#if os(Linux)
-    process.executableURL = URL(fileURLWithPath: "/usr/bin/swift")
-    var args = ["build"]
-#else
-    process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
-    let buildSystem = detectBuildSystem(packagePath: packagePath)
-    var args = ["swift", "build", "--build-system", buildSystem]
-#endif
-    args.append(contentsOf: [
-        "--package-path", packagePath.path,
-        "-Xswiftc", "-emit-symbol-graph",
-        "-Xswiftc", "-emit-symbol-graph-dir",
-        "-Xswiftc", artifactDir.path,
-        "-Xswiftc", "-symbol-graph-minimum-access-level",
-        "-Xswiftc", "public",
-    ])
-    process.arguments = args
-
-    FileManager.default.createFile(atPath: stdoutFile.path, contents: nil)
-    FileManager.default.createFile(atPath: stderrFile.path, contents: nil)
-    guard let outFH = try? FileHandle(forWritingTo: stdoutFile),
-          let errFH = try? FileHandle(forWritingTo: stderrFile) else {
-        throw ValidationError("Failed to create temp files for build output")
-    }
-    process.standardOutput = outFH
-    process.standardError = errFH
-
-    try process.run()
-    process.waitUntilExit()
-
-    try outFH.synchronize()
-    try errFH.synchronize()
-    try outFH.close()
-    try errFH.close()
-
-    if process.terminationStatus != 0 {
-        if let outStr = try? String(contentsOf: stdoutFile, encoding: .utf8), !outStr.isEmpty {
-            FileHandle.standardError.write(Data(outStr.utf8))
-        }
-        if let errStr = try? String(contentsOf: stderrFile, encoding: .utf8), !errStr.isEmpty {
-            FileHandle.standardError.write(Data(errStr.utf8))
-        }
-        throw ExitCode(process.terminationStatus)
-    }
-
-    return artifactDir
 }
 
 // MARK: - alignment score
@@ -394,163 +377,127 @@ struct ScoreCommand: ParsableCommand {
     }
 }
 
-// MARK: - alignment snapshot
+// MARK: - alignment dashboard
 
-struct SnapshotCommand: AsyncParsableCommand {
+struct DashboardCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "snapshot",
-        abstract: "All-in-one: build interfaces, score, and open a local dashboard"
+        commandName: "dashboard",
+        abstract: "Generate an HTML alignment dashboard from score JSON and interface files"
     )
 
-    @Option(help: "Path to the package root (defaults to current directory)")
-    var packagePath: String = "."
+    @Option(help: "Path to score JSON (from 'alignment score --json --output')")
+    var scoreJson: String
 
-    @Option(help: "Output directory for generated files")
-    var outputDir: String = ".alignment-snapshot"
+    @Option(help: "Directory containing generated interface .swift files")
+    var interfacesDir: String
+
+    @Option(help: "Output directory for dashboard files")
+    var outputDir: String
+
+    @Option(help: "Title for the dashboard page (default: directory name)")
+    var title: String?
 
     @Flag(help: "Skip opening the dashboard in browser")
     var noOpen: Bool = false
 
-    @Flag(help: "JSON output format")
-    var json: Bool = false
-
-    func run() async throws {
-        let rootURL = URL(fileURLWithPath: packagePath).standardizedFileURL
-        let outURL = rootURL.appendingPathComponent(outputDir).standardizedFileURL
+    func run() throws {
         let fm = FileManager.default
+        let scoreURL = URL(fileURLWithPath: scoreJson).standardizedFileURL
+        let interfacesURL = URL(fileURLWithPath: interfacesDir).standardizedFileURL
+        let outURL = URL(fileURLWithPath: outputDir).standardizedFileURL
 
+        // Read score JSON
+        let scoreData = try Data(contentsOf: scoreURL)
+        guard let scoreDict = try JSONSerialization.jsonObject(with: scoreData) as? [String: Any] else {
+            throw ValidationError("Invalid score JSON at \(scoreURL.path)")
+        }
+
+        // Create output directories
         try? fm.removeItem(at: outURL)
         try fm.createDirectory(at: outURL, withIntermediateDirectories: true)
-        let interfacesDir = outURL.appendingPathComponent("interfaces")
-        try fm.createDirectory(at: interfacesDir, withIntermediateDirectories: true)
+        let svgsDir = outURL.appendingPathComponent("svgs")
+        try fm.createDirectory(at: svgsDir, withIntermediateDirectories: true)
 
-        // Phase 1: Score
-        print("→ Scoring alignment…")
-        let collector = GradeCollector()
-        let statsByTarget = try collector.collect(in: rootURL)
-
-        // Phase 2: Generate interfaces — build once per package, render all targets
+        // Load interface texts (recursively, to handle subdirectory layout)
         var interfaceResults: [String: String] = [:]
-        let packageDirs = try findPackageDirs(in: rootURL)
-        for pkgDir in packageDirs {
-            let packageName = pkgDir.lastPathComponent
-            let pkgInterfacesDir = interfacesDir.appendingPathComponent(packageName)
-            try fm.createDirectory(at: pkgInterfacesDir, withIntermediateDirectories: true)
-            let targets = try discoverTargets(in: pkgDir)
-            print("  building \(packageName) (\(targets.count) targets)…")
-            do {
-                let sgDir = try buildAllSymbolGraphs(packagePath: pkgDir)
-                for target in targets {
-                    do {
-                        let rendered = try renderFromSymbolGraphDirectory(sgDir, module: target)
-                        let outFile = pkgInterfacesDir.appendingPathComponent("\(target).swift")
-                        try rendered.write(to: outFile, atomically: true, encoding: .utf8)
-                        interfaceResults["\(packageName)/\(target)"] = rendered
-                    } catch {
-                        print("    ⚠ skipped \(target): \(error)")
+        if fm.fileExists(atPath: interfacesURL.path) {
+            if let enumerator = fm.enumerator(at: interfacesURL, includingPropertiesForKeys: nil) {
+                for case let file as URL in enumerator {
+                    guard file.pathExtension == "swift" else { continue }
+                    var rel = file.path.replacingOccurrences(of: interfacesURL.path + "/", with: "")
+                    rel = rel.replacingOccurrences(of: ".swift", with: "")
+                    // Normalize: "WuhuAppKit/App" matches the label "WuhuAppKit/App"
+                    if let content = try? String(contentsOf: file, encoding: String.Encoding.utf8) {
+                        interfaceResults[rel] = content
                     }
-                }
-            } catch {
-                print("  ⚠ package \(packageName) failed: \(error)")
-                for target in targets {
-                    print("    ⚠ skipped \(target)")
                 }
             }
         }
 
-        // Phase 3: Dashboard
-        print("→ Generating dashboard…")
+        // Generate SVGs and collect aggregations
         let svgGen = SVGBarGenerator()
-        let svgsDir = outURL.appendingPathComponent("svgs")
-        try fm.createDirectory(at: svgsDir, withIntermediateDirectories: true)
-
         var aggregations: [(label: String, score: AlignmentScore)] = []
-        for (target, stats) in statsByTarget.sorted(by: { $0.key < $1.key }) {
-            let score = AlignmentScore.compute(from: stats)
-            aggregations.append((target, score))
-            let svg = svgGen.generate(score: score)
+
+        for (target, value) in scoreDict.sorted(by: { $0.key < $1.key }) {
+            guard let info = value as? [String: Any],
+                  let score = info["score"] as? Int,
+                  let totalLoc = info["total_loc"] as? Int,
+                  let grades = info["grades"] as? [String: Int] else { continue }
+
+            var gradeCounts: [AlignmentGrade: Int] = [:]
+            for grade in AlignmentGrade.allCases {
+                gradeCounts[grade] = grades[grade.rawValue] ?? 0
+            }
+            let alignmentScore = AlignmentScore(score: score, totalLOC: totalLoc, grades: gradeCounts)
+            aggregations.append((target, alignmentScore))
+
+            let svg = svgGen.generate(score: alignmentScore)
             let safe = target.replacingOccurrences(of: "/", with: "_")
             try svg.write(to: svgsDir.appendingPathComponent("\(safe).svg"), atomically: true, encoding: .utf8)
         }
 
-        let allStats = statsByTarget.values.flatMap { $0 }
-        let overallScore = AlignmentScore.compute(from: allStats)
+        // Overall score
+        let allScores = aggregations.map(\.score)
+        let totalLOC = allScores.map(\.totalLOC).reduce(0, +)
+        var overallGrades: [AlignmentGrade: Int] = [:]
+        for grade in AlignmentGrade.allCases {
+            overallGrades[grade] = allScores.map { $0.grades[grade, default: 0] }.reduce(0, +)
+        }
+        let overallScore = AlignmentScore(
+            score: totalLOC > 0 ? (totalLOC - (overallGrades[.D] ?? 0)) * 100 / totalLOC : 0,
+            totalLOC: totalLOC,
+            grades: overallGrades
+        )
         try svgGen.generate(score: overallScore)
             .write(to: outURL.appendingPathComponent("status.svg"), atomically: true, encoding: .utf8)
 
-        var gradeDict: [String: Int] = [:]
-        for g in AlignmentGrade.allCases { gradeDict[g.rawValue] = overallScore.grades[g, default: 0] }
-        let scoreJSON: [String: Any] = ["score": overallScore.score, "total_loc": overallScore.totalLOC, "grades": gradeDict]
-        try JSONSerialization.data(withJSONObject: scoreJSON, options: .prettyPrinted)
-            .write(to: outURL.appendingPathComponent("score.json"))
-
+        // Generate HTML
+        let pageTitle = title ?? outURL.lastPathComponent
         let html = generateDashboardHTML(
-            title: rootURL.lastPathComponent,
+            title: pageTitle,
             overallScore: overallScore,
             aggregations: aggregations,
             interfaceResults: interfaceResults
         )
-        try html.write(to: outURL.appendingPathComponent("index.html"), atomically: true, encoding: .utf8)
+        try html.write(to: outURL.appendingPathComponent("index.html"), atomically: true, encoding: String.Encoding.utf8)
 
-        // Output
-        if json {
-            var result: [String: Any] = ["root": rootURL.path, "overall_score": overallScore.score, "overall_total_loc": overallScore.totalLOC, "overall_grades": gradeDict, "targets": [:]]
-            var targetsDict: [String: Any] = [:]
-            for (label, score) in aggregations {
-                var gd: [String: Int] = [:]
-                for g in AlignmentGrade.allCases { gd[g.rawValue] = score.grades[g, default: 0] }
-                targetsDict[label] = ["score": score.score, "total_loc": score.totalLOC, "grades": gd, "interface": interfaceResults[label] ?? ""]
-            }
-            result["targets"] = targetsDict
-            print(String(data: try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys]), encoding: .utf8)!)
-        } else {
-            print("\nDone! Alignment snapshot at \(outURL.path)")
-            print("  overall: \(overallScore.score)% across \(overallScore.totalLOC) LOC")
-            if !noOpen {
+        print("Dashboard generated at \(outURL.path)")
+        print("  overall: \(overallScore.score)% across \(overallScore.totalLOC) LOC")
+
+        if !noOpen {
 #if os(macOS)
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-                process.arguments = [outURL.appendingPathComponent("index.html").path]
-                try? process.run()
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+            process.arguments = [outURL.appendingPathComponent("index.html").path]
+            try? process.run()
 #endif
-            }
         }
     }
 }
 
-// Helpers
+// MARK: - Dashboard HTML generation
 
-private func findPackageDirs(in root: URL) throws -> [URL] {
-    let fm = FileManager.default
-    if fm.fileExists(atPath: root.appendingPathComponent("Package.swift").path) { return [root] }
-    let pkgs = root.appendingPathComponent("Packages")
-    guard fm.fileExists(atPath: pkgs.path) else { return [] }
-    return try fm.contentsOfDirectory(at: pkgs, includingPropertiesForKeys: [.isDirectoryKey])
-        .filter { fm.fileExists(atPath: $0.appendingPathComponent("Package.swift").path) }
-}
-
-private func discoverTargets(in packageDir: URL) throws -> [String] {
-    let proc = Process()
-#if os(Linux)
-    proc.executableURL = URL(fileURLWithPath: "/usr/bin/swift")
-    proc.arguments = ["package", "--package-path", packageDir.path, "dump-package"]
-#else
-    proc.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
-    proc.arguments = ["swift", "package", "--package-path", packageDir.path, "dump-package"]
-#endif
-    let pipe = Pipe(); proc.standardOutput = pipe
-    try proc.run(); proc.waitUntilExit()
-    guard proc.terminationStatus == 0,
-          let json = try JSONSerialization.jsonObject(with: pipe.fileHandleForReading.readDataToEndOfFile()) as? [String: Any],
-          let targets = json["targets"] as? [[String: Any]] else { return [] }
-    let valid: Set<String> = ["regular", "executable", "macro"]
-    return targets.compactMap { t in
-        guard valid.contains(t["type"] as? String ?? ""), let name = t["name"] as? String else { return nil }
-        return name
-    }
-}
-
-private func generateDashboardHTML(
+func generateDashboardHTML(
     title: String, overallScore: AlignmentScore,
     aggregations: [(label: String, score: AlignmentScore)],
     interfaceResults: [String: String]
@@ -560,7 +507,7 @@ private func generateDashboardHTML(
     for (label, score) in aggregations {
         let safe = label.replacingOccurrences(of: "/", with: "_")
         let link = interfaceResults[label] != nil
-            ? "<a href=\"interfaces/\(escaped(safe)).swift\">\(escaped(label))</a>"
+            ? "<a href=\"interfaces/\(escaped(label)).swift\">\(escaped(label))</a>"
             : escaped(label)
         rows += "<tr><td>\(link)</td><td>\(score.score)%</td><td>\(score.totalLOC)</td>" +
             "<td>\(AlignmentGrade.allCases.map { "\($0.rawValue):\(score.grades[$0, default: 0])" }.joined(separator: " "))</td>" +
@@ -569,7 +516,7 @@ private func generateDashboardHTML(
     return """
     <!doctype html><html lang="en"><head><meta charset="utf-8"><title>\(te) · alignment</title>
     <style>body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;background:#0b0f17;color:#e5e7eb;margin:0;padding:32px;max-width:960px}h1{font-size:24px;margin:0 0 4px}.subtitle{color:#6b7280;font-size:13px;margin-bottom:24px}table{width:100%;border-collapse:collapse;font-size:13px;margin-top:24px}th,td{padding:8px 12px;text-align:left;border-bottom:1px solid #1f2937}th{color:#9ca3af;font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:.06em}a{color:#7dd3fc;text-decoration:none}a:hover{text-decoration:underline}.score{font-size:48px;font-weight:600}img{max-width:100%}</style></head><body>
-    <h1>\(te)</h1><p class="subtitle">Alignment snapshot</p>
+    <h1>\(te)</h1><p class="subtitle">Alignment dashboard</p>
     <div class="score">\(overallScore.score)<span style="font-size:18px;color:#9ca3af;margin-left:4px">%</span></div>
     <img src="status.svg" alt="alignment bar" style="margin:12px 0">
     <table><thead><tr><th>Target</th><th>Score</th><th>LOC</th><th>Grades</th><th></th></tr></thead><tbody>\(rows)</tbody></table></body></html>
