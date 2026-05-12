@@ -82,7 +82,7 @@ struct InterfaceCommand: ParsableCommand {
         }
 
         if let outputPath = self.output {
-            let outputURL = URL(fileURLWithPath: outputPath, relativeTo: pkgURL).standardizedFileURL
+            let outputURL = URL(fileURLWithPath: outputPath).standardizedFileURL
             try FileManager.default.createDirectory(at: outputURL.deletingLastPathComponent(), withIntermediateDirectories: true)
             try output.write(to: outputURL, atomically: true, encoding: .utf8)
             print("Wrote interface to \(outputURL.path)")
@@ -104,7 +104,7 @@ struct InterfaceCommand: ParsableCommand {
 
         let outputDirURL: URL
         if let out = output {
-            outputDirURL = URL(fileURLWithPath: out, relativeTo: pkgURL).standardizedFileURL
+            outputDirURL = URL(fileURLWithPath: out).standardizedFileURL
         } else {
             outputDirURL = pkgURL
                 .appendingPathComponent(".build")
