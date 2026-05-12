@@ -412,8 +412,8 @@ struct DashboardCommand: ParsableCommand {
             throw ValidationError("Invalid score JSON at \(scoreURL.path)")
         }
 
-        // Create output directories
-        try? fm.removeItem(at: outURL)
+        // Create output directories (don't nuke — caller may have placed
+        // score.json and interfaces/ here already)
         try fm.createDirectory(at: outURL, withIntermediateDirectories: true)
         let svgsDir = outURL.appendingPathComponent("svgs")
         try fm.createDirectory(at: svgsDir, withIntermediateDirectories: true)
