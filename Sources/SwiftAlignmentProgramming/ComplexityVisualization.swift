@@ -224,10 +224,19 @@ public struct ComplexityDashboardHTMLGenerator: Sendable {
             th, td { border-bottom: 1px solid #1f2937; padding: 8px 10px; text-align: left; }
             th { color: #94a3b8; font-weight: 500; text-transform: uppercase; font-size: 11px; letter-spacing: .06em; }
             #treemap { position: relative; height: 620px; background: #020617; border: 1px solid #1f2937; border-radius: 14px; overflow: hidden; }
-            .node { position: absolute; box-sizing: border-box; border: 1px solid rgba(15, 23, 42, .9); overflow: hidden; border-radius: 7px; padding: 6px; color: white; cursor: default; }
-            .node:hover { outline: 2px solid #7dd3fc; z-index: 10; }
-            .node .name { font-weight: 650; font-size: 12px; text-shadow: 0 1px 2px rgba(0,0,0,.6); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-            .node .metric { font-size: 11px; opacity: .85; margin-top: 2px; }
+            #treemap svg { display: block; width: 100%; height: 100%; }
+            .treemap-toolbar { display: flex; align-items: center; gap: 10px; margin: -4px 0 10px; color: #94a3b8; font-size: 13px; }
+            .treemap-toolbar button { background: #111827; color: #e5e7eb; border: 1px solid #334155; border-radius: 8px; padding: 7px 10px; cursor: pointer; }
+            .treemap-toolbar button:disabled { opacity: .45; cursor: default; }
+            .breadcrumb a { color: #7dd3fc; cursor: pointer; text-decoration: none; }
+            .breadcrumb a:hover { text-decoration: underline; }
+            .treemap-node { cursor: zoom-in; }
+            .treemap-node.leaf { cursor: pointer; }
+            .treemap-node rect { stroke: rgba(2, 6, 23, .88); stroke-width: 1.25; }
+            .treemap-node:hover rect { stroke: #7dd3fc; stroke-width: 2.5; }
+            .treemap-label { fill: white; font-size: 12px; font-weight: 650; pointer-events: none; text-shadow: 0 1px 2px rgba(0,0,0,.72); }
+            .treemap-metric { fill: rgba(255,255,255,.82); font-size: 11px; pointer-events: none; text-shadow: 0 1px 2px rgba(0,0,0,.72); }
+            .treemap-empty { padding: 18px; color: #94a3b8; }
             input { width: 100%; box-sizing: border-box; background: #020617; color: #e5e7eb; border: 1px solid #334155; border-radius: 8px; padding: 10px; margin: 0 0 12px; }
             @media (max-width: 860px) { .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
           </style>
@@ -243,6 +252,10 @@ public struct ComplexityDashboardHTMLGenerator: Sendable {
           </section>
 
           <h2>Treemap</h2>
+          <div class="treemap-toolbar">
+            <button id="treemap-up" disabled>Back</button>
+            <span id="treemap-breadcrumb" class="breadcrumb"></span>
+          </div>
           <div id="treemap" aria-label="Complexity treemap"></div>
 
           <h2>Targets</h2>
@@ -254,59 +267,100 @@ public struct ComplexityDashboardHTMLGenerator: Sendable {
           <input id="filter" placeholder="Filter files or targets…">
           <table><thead><tr><th>File</th><th>Target</th><th>Weighted</th><th>Raw</th><th>Lines</th></tr></thead><tbody id="files"></tbody></table>
 
+          <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
           <script>
             const tree = \(treeJSON);
             const files = \(fileJSON);
             const fmt = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 });
+            let currentPath = [tree];
             function color(depth, value, max) {
-              const hue = (215 + depth * 31) % 360;
-              const lightness = 22 + Math.min(26, (value / Math.max(max, 1)) * 26);
+              const hue = (214 + depth * 29) % 360;
+              const lightness = 22 + Math.min(28, (value / Math.max(max, 1)) * 28);
               return `hsl(${hue} 72% ${lightness}%)`;
             }
-            function layout(children, x, y, w, h) {
-              const total = children.reduce((sum, child) => sum + child.weightedScore, 0) || 1;
-              let cursor = 0;
-              const horizontal = w >= h;
-              return children.map((child, index) => {
-                const share = child.weightedScore / total;
-                let rect;
-                if (horizontal) {
-                  const cw = index === children.length - 1 ? w - cursor : w * share;
-                  rect = { node: child, x: x + cursor, y, w: cw, h };
-                  cursor += cw;
-                } else {
-                  const ch = index === children.length - 1 ? h - cursor : h * share;
-                  rect = { node: child, x, y: y + cursor, w, h: ch };
-                  cursor += ch;
-                }
-                return rect;
+            function renderBreadcrumb() {
+              const breadcrumb = document.getElementById('treemap-breadcrumb');
+              breadcrumb.innerHTML = currentPath.map((node, index) => {
+                const label = escapeHTML(node.name || 'root');
+                return index === currentPath.length - 1
+                  ? `<strong>${label}</strong>`
+                  : `<a data-index="${index}">${label}</a>`;
+              }).join(' / ');
+              breadcrumb.querySelectorAll('a').forEach(anchor => {
+                anchor.addEventListener('click', event => {
+                  currentPath = currentPath.slice(0, Number(event.currentTarget.dataset.index) + 1);
+                  renderTreemap();
+                });
               });
-            }
-            function draw(node, container, x, y, w, h, depth, max) {
-              if (!node.children || node.children.length === 0) return;
-              for (const rect of layout(node.children, x, y, w, h)) {
-                const el = document.createElement('div');
-                el.className = 'node';
-                el.style.left = `${rect.x}px`;
-                el.style.top = `${rect.y}px`;
-                el.style.width = `${Math.max(0, rect.w)}px`;
-                el.style.height = `${Math.max(0, rect.h)}px`;
-                el.style.background = color(depth, rect.node.weightedScore, max);
-                el.title = `${rect.node.path || rect.node.name}\nweighted ${fmt.format(rect.node.weightedScore)} raw ${fmt.format(rect.node.rawScore)}\nfiles ${rect.node.files} lines ${rect.node.lines}`;
-                if (rect.w > 82 && rect.h > 34) {
-                  el.innerHTML = `<div class="name"></div><div class="metric">${fmt.format(rect.node.weightedScore)}</div>`;
-                  el.querySelector('.name').textContent = rect.node.name;
-                }
-                container.appendChild(el);
-                if (rect.w > 130 && rect.h > 90) {
-                  draw(rect.node, container, rect.x + 5, rect.y + 28, Math.max(0, rect.w - 10), Math.max(0, rect.h - 33), depth + 1, max);
-                }
-              }
+              document.getElementById('treemap-up').disabled = currentPath.length <= 1;
             }
             function renderTreemap() {
               const container = document.getElementById('treemap');
               container.innerHTML = '';
-              draw(tree, container, 0, 0, container.clientWidth, container.clientHeight, 0, tree.weightedScore);
+              renderBreadcrumb();
+              if (!window.d3) {
+                container.innerHTML = '<div class="treemap-empty">D3.js failed to load, so the zoomable treemap cannot be rendered.</div>';
+                return;
+              }
+              const current = currentPath[currentPath.length - 1];
+              if (!current.children || current.children.length === 0) {
+                container.innerHTML = '<div class="treemap-empty">No child nodes to display.</div>';
+                return;
+              }
+              const width = Math.max(1, container.clientWidth);
+              const height = Math.max(1, container.clientHeight);
+              const root = d3.hierarchy(current)
+                .sum(node => node.children && node.children.length ? 0 : Math.max(0, node.weightedScore || 0))
+                .sort((a, b) => b.value - a.value || d3.ascending(a.data.name, b.data.name));
+              d3.treemap()
+                .tile(d3.treemapSquarify.ratio(1.25))
+                .size([width, height])
+                .paddingOuter(4)
+                .paddingInner(3)
+                .round(true)(root);
+
+              const svg = d3.select(container)
+                .append('svg')
+                .attr('viewBox', `0 0 ${width} ${height}`)
+                .attr('role', 'img')
+                .attr('aria-label', `Complexity treemap zoomed to ${current.name}`);
+              const maxValue = root.children ? d3.max(root.children, child => child.value) || 1 : 1;
+              const nodes = svg.selectAll('g')
+                .data(root.children || [])
+                .join('g')
+                .attr('class', d => `treemap-node${d.data.children && d.data.children.length ? '' : ' leaf'}`)
+                .attr('transform', d => `translate(${d.x0},${d.y0})`)
+                .on('click', (event, d) => {
+                  event.stopPropagation();
+                  if (d.data.children && d.data.children.length) {
+                    currentPath.push(d.data);
+                    renderTreemap();
+                  } else {
+                    const filter = d.data.path || d.data.name;
+                    document.getElementById('filter').value = filter;
+                    renderFiles(filter);
+                    document.getElementById('filter').scrollIntoView({ behavior: 'smooth', block: 'center' });
+                  }
+                });
+              nodes.append('title')
+                .text(d => `${d.data.path || d.data.name}\nweighted ${fmt.format(d.data.weightedScore)} raw ${fmt.format(d.data.rawScore)}\nfiles ${d.data.files} lines ${d.data.lines}`);
+              nodes.append('rect')
+                .attr('width', d => Math.max(0, d.x1 - d.x0))
+                .attr('height', d => Math.max(0, d.y1 - d.y0))
+                .attr('rx', 7)
+                .attr('fill', d => color(d.depth + currentPath.length, d.value, maxValue));
+              nodes.filter(d => (d.x1 - d.x0) > 72 && (d.y1 - d.y0) > 30)
+                .append('text')
+                .attr('class', 'treemap-label')
+                .attr('x', 7)
+                .attr('y', 17)
+                .text(d => d.data.name);
+              nodes.filter(d => (d.x1 - d.x0) > 72 && (d.y1 - d.y0) > 48)
+                .append('text')
+                .attr('class', 'treemap-metric')
+                .attr('x', 7)
+                .attr('y', 34)
+                .text(d => fmt.format(d.data.weightedScore));
             }
             function renderFiles(filter = '') {
               const needle = filter.toLowerCase();
@@ -321,6 +375,12 @@ public struct ComplexityDashboardHTMLGenerator: Sendable {
               return String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
             }
             window.addEventListener('resize', renderTreemap);
+            document.getElementById('treemap-up').addEventListener('click', () => {
+              if (currentPath.length > 1) {
+                currentPath.pop();
+                renderTreemap();
+              }
+            });
             document.getElementById('filter').addEventListener('input', event => renderFiles(event.target.value));
             renderTreemap();
             renderFiles();

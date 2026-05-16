@@ -106,6 +106,9 @@ import Testing
 
     let html = try ComplexityDashboardHTMLGenerator().generate(report: report, title: "Demo")
     #expect(html.contains("Treemap"))
+    #expect(html.contains("https://cdn.jsdelivr.net/npm/d3@7"))
+    #expect(html.contains("treemap-up"))
+    #expect(html.contains("currentPath.push"))
     #expect(html.contains("Targets"))
     #expect(html.contains("Files"))
 }
