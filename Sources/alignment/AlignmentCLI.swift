@@ -11,6 +11,9 @@ struct AlignmentCLI: AsyncParsableCommand {
             InterfaceCommand.self,
             ScoreCommand.self,
             DashboardCommand.self,
+            ComplexityCommand.self,
+            ComplexitySummaryCommand.self,
+            ComplexityDashboardCommand.self,
         ]
     )
 }
@@ -512,6 +515,132 @@ struct DashboardCommand: ParsableCommand {
             try? process.run()
 #endif
         }
+    }
+}
+
+
+// MARK: - alignment complexity
+
+struct ComplexityCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "complexity",
+        abstract: "Measure Swift-oriented weighted complexity for non-test source targets"
+    )
+
+    @Option(help: "Root directory to scan (defaults to current directory)")
+    var root: String = "."
+
+    @Option(help: "Write JSON report to file instead of stdout")
+    var output: String?
+
+    func run() throws {
+        let rootURL = URL(fileURLWithPath: root).standardizedFileURL
+        let report = try ComplexityAnalyzer().analyze(root: rootURL)
+        let data = try complexityJSONEncoder().encode(report)
+        if let output {
+            let outputURL = URL(fileURLWithPath: output).standardizedFileURL
+            try FileManager.default.createDirectory(at: outputURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try data.write(to: outputURL)
+            print("Wrote complexity report to \(outputURL.path)")
+        } else {
+            print(String(data: data, encoding: .utf8)!)
+        }
+    }
+}
+
+// MARK: - alignment complexity-summary
+
+extension ComplexitySummaryGrouping: ExpressibleByArgument {}
+
+struct ComplexitySummaryCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "complexity-summary",
+        abstract: "Print an ASCII summary from complexity JSON"
+    )
+
+    @Option(help: "Path to complexity JSON from 'alignment complexity --output'")
+    var input: String
+
+    @Option(help: "Summary grouping: target, file, or tree")
+    var by: ComplexitySummaryGrouping = .target
+
+    @Option(help: "Maximum number of top-level rows to show")
+    var top: Int = 40
+
+    func validate() throws {
+        guard top > 0 else { throw ValidationError("--top must be greater than zero") }
+    }
+
+    func run() throws {
+        let inputURL = URL(fileURLWithPath: input).standardizedFileURL
+        let report = try readComplexityReport(inputURL)
+        print(ComplexitySummaryRenderer().render(report: report, grouping: by, top: top), terminator: "")
+    }
+}
+
+// MARK: - alignment complexity-dashboard
+
+struct ComplexityDashboardCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "complexity-dashboard",
+        abstract: "Generate an HTML complexity dashboard from complexity JSON"
+    )
+
+    @Option(help: "Path to complexity JSON from 'alignment complexity --output'")
+    var input: String
+
+    @Option(help: "Output directory for dashboard files")
+    var outputDir: String
+
+    @Option(help: "Title for the dashboard page (default: report root directory name)")
+    var title: String?
+
+    @Flag(help: "Skip opening the dashboard in browser")
+    var noOpen: Bool = false
+
+    func run() throws {
+        let inputURL = URL(fileURLWithPath: input).standardizedFileURL
+        let outputURL = URL(fileURLWithPath: outputDir).standardizedFileURL
+        let report = try readComplexityReport(inputURL)
+        let pageTitle = title ?? URL(fileURLWithPath: report.root).lastPathComponent
+        let html = try ComplexityDashboardHTMLGenerator().generate(report: report, title: pageTitle)
+
+        try FileManager.default.createDirectory(at: outputURL, withIntermediateDirectories: true)
+        let indexURL = outputURL.appendingPathComponent("index.html")
+        try html.write(to: indexURL, atomically: true, encoding: .utf8)
+        print("Complexity dashboard generated at \(indexURL.path)")
+        print("  weighted=\(report.summary.weightedScore) raw=\(report.summary.rawScore) files=\(report.summary.files)")
+
+        if !noOpen {
+#if os(macOS)
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+            process.arguments = [indexURL.path]
+            try? process.run()
+#endif
+        }
+    }
+}
+
+private func complexityJSONEncoder() -> JSONEncoder {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    encoder.keyEncodingStrategy = .convertToSnakeCase
+    return encoder
+}
+
+private func complexityJSONDecoder() -> JSONDecoder {
+    let decoder = JSONDecoder()
+    decoder.keyDecodingStrategy = .convertFromSnakeCase
+    return decoder
+}
+
+private func readComplexityReport(_ url: URL) throws -> ComplexityReport {
+    do {
+        let data = try Data(contentsOf: url)
+        return try complexityJSONDecoder().decode(ComplexityReport.self, from: data)
+    } catch {
+        throw ValidationError("Invalid complexity JSON at \(url.path): \(error)")
     }
 }
 

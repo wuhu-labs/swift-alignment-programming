@@ -59,6 +59,36 @@ alignment dashboard \
   --title "My Project"
 ```
 
+### `alignment complexity`
+
+Measure Swift-oriented weighted complexity for non-test source targets. The
+collector uses SwiftPM target metadata and has built-in support for the aligned
+`Targets/<target>/Sources` layout, filtering out `Targets/<target>/Tests` by
+path rather than test-file naming conventions.
+
+```bash
+# Write a detailed JSON report with per-file and sparse per-line complexity
+alignment complexity --root /path/to/package --output complexity.json
+
+# Print target or file summaries from the JSON
+alignment complexity-summary --input complexity.json --by target
+alignment complexity-summary --input complexity.json --by file --top 50
+
+# Print an ASCII tree: target → folders → files
+alignment complexity-summary --input complexity.json --by tree
+
+# Generate an HTML dashboard with target/file tables and a treemap
+alignment complexity-dashboard \
+  --input complexity.json \
+  --output-dir complexity-dashboard \
+  --title "My Project"
+```
+
+The report includes both raw and weighted scores. The default weighting models
+Swift maintenance cost: broader access (`public`, `package`, `internal`,
+`fileprivate`, `private`), reference/concurrency types (`class`, `final class`,
+`actor`), mutable/stored properties, and `async`/`throws` methods.
+
 ## Monorepo CI recipe
 
 ```bash
