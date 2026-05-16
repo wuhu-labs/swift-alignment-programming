@@ -188,6 +188,22 @@ private final class MutableTreeNode {
 
 // MARK: - Dashboard HTML
 
+private struct ComplexityDashboardFileSummary: Codable {
+    var path: String
+    var target: String
+    var rawScore: Double
+    var weightedScore: Double
+    var lines: Int
+
+    init(file: ComplexityFileReport) {
+        path = file.path
+        target = file.target
+        rawScore = file.rawScore
+        weightedScore = file.weightedScore
+        lines = file.lines
+    }
+}
+
 public struct ComplexityDashboardHTMLGenerator: Sendable {
     public init() {}
 
@@ -196,7 +212,10 @@ public struct ComplexityDashboardHTMLGenerator: Sendable {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let treeJSON = String(data: try encoder.encode(tree), encoding: .utf8) ?? "{}"
-        let fileJSON = String(data: try encoder.encode(report.files.sorted { $0.weightedScore > $1.weightedScore }), encoding: .utf8) ?? "[]"
+        let dashboardFiles = report.files
+            .sorted { $0.weightedScore > $1.weightedScore }
+            .map(ComplexityDashboardFileSummary.init(file:))
+        let fileJSON = String(data: try encoder.encode(dashboardFiles), encoding: .utf8) ?? "[]"
         let targetRows = report.targets.sorted { $0.weightedScore > $1.weightedScore }.map { target in
             """
             <tr><td>\(escapeHTML(target.name))</td><td>\(format(target.weightedScore))</td><td>\(format(target.rawScore))</td><td>\(target.files)</td><td>\(target.lines)</td></tr>
