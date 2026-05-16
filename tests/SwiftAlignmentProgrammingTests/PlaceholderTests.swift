@@ -3,5 +3,5 @@ import Testing
 
 @Test func placeholder() {
     // Tests will be added as the library stabilizes
-    #expect(true)
+    #expect(Bool(true))
 }
