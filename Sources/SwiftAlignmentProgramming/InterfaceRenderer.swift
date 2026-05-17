@@ -335,6 +335,7 @@ public func buildOutline(from symbolGraphDir: URL, module: String) throws -> Mod
     var outline = ModuleOutline(module: module)
     var typeNodes: [String: TypeNode] = [:]
     var extensionGroups: [String: ExtensionGroup] = [:]
+    var extensionTypeGroups: [String: (header: String, availability: String?)] = [:]
 
     // Filter symbols
     let keptSymbols = loaded.symbols.filter { symbol in
@@ -345,7 +346,7 @@ public func buildOutline(from symbolGraphDir: URL, module: String) throws -> Mod
 
     // First pass: collect container types
     for symbol in keptSymbols {
-        guard containerKindIDs.contains(symbol.kindID), symbol.swiftExtension == nil else { continue }
+        guard containerKindIDs.contains(symbol.kindID) else { continue }
 
         let conformanceNames = loaded.conformanceTargets[symbol.preciseID]?.map {
             normalizeConformanceName($0, preciseToPath: loaded.preciseToPath, module: module)
@@ -366,6 +367,10 @@ public func buildOutline(from symbolGraphDir: URL, module: String) throws -> Mod
             rawType: loaded.rawTypes[symbol.fullPath]
         )
         typeNodes[symbol.fullPath] = node
+
+        if symbol.swiftExtension != nil {
+            extensionTypeGroups[symbol.fullPath] = (renderExtensionHeader(symbol, module: module), symbol.availability)
+        }
     }
 
     // Build parent-child relationships
@@ -373,6 +378,15 @@ public func buildOutline(from symbolGraphDir: URL, module: String) throws -> Mod
         let parts = node.path.split(separator: ".").map(String.init)
         if parts.count > 1, let parent = typeNodes[parts.dropLast().joined(separator: ".")] {
             parent.childTypes.append(node)
+        } else if let extensionTypeGroup = extensionTypeGroups[node.path] {
+            let key = "\(extensionTypeGroup.header)|\(extensionTypeGroup.availability ?? "nil")"
+            var group = extensionGroups[key] ?? ExtensionGroup(
+                header: extensionTypeGroup.header,
+                availability: extensionTypeGroup.availability,
+                members: []
+            )
+            group.types.append(node)
+            extensionGroups[key] = group
         } else {
             outline.types.append(node)
         }
@@ -381,7 +395,7 @@ public func buildOutline(from symbolGraphDir: URL, module: String) throws -> Mod
     // Second pass: collect members, extensions, typealiases, globals
     for symbol in keptSymbols {
         // Skip container types (already handled)
-        if containerKindIDs.contains(symbol.kindID) && symbol.swiftExtension == nil {
+        if containerKindIDs.contains(symbol.kindID) {
             continue
         }
 
@@ -521,7 +535,16 @@ public func renderOutline(_ outline: ModuleOutline) -> String {
         var section: [String] = []
         if let av = group.availability { section.append(av) }
         section.append(group.header)
-        section.append(contentsOf: group.members.map { "  " + $0 })
+        var children: [String] = []
+        for type in group.types.sorted(by: { typeSortKey($0) < typeSortKey($1) }) {
+            if !children.isEmpty { children.append("") }
+            children.append(contentsOf: renderType(type, indent: 2))
+        }
+        if !group.members.isEmpty {
+            if !children.isEmpty { children.append("") }
+            children.append(contentsOf: group.members.map { "  " + $0 })
+        }
+        section.append(contentsOf: children)
         section.append("}")
         sections.append(section)
     }

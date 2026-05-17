@@ -1,0 +1,151 @@
+{
+  "metadata": {
+    "formatVersion": {
+      "major": 0,
+      "minor": 6
+    }
+  },
+  "module": {
+    "name": "ExtensionNesting"
+  },
+  "symbols": [
+    {
+      "kind": { "identifier": "swift.struct" },
+      "identifier": { "precise": "s:16ExtensionNesting5OuterV" },
+      "pathComponents": ["Outer"],
+      "accessLevel": "public",
+      "declarationFragments": [
+        { "kind": "keyword", "spelling": "struct" },
+        { "kind": "text", "spelling": " " },
+        { "kind": "identifier", "spelling": "Outer" }
+      ]
+    },
+    {
+      "kind": { "identifier": "swift.init" },
+      "identifier": { "precise": "s:16ExtensionNesting5OuterVACycfc" },
+      "pathComponents": ["Outer", "init()"],
+      "accessLevel": "public",
+      "declarationFragments": [
+        { "kind": "keyword", "spelling": "init" },
+        { "kind": "text", "spelling": "()" }
+      ]
+    },
+    {
+      "kind": { "identifier": "swift.protocol" },
+      "identifier": { "precise": "s:16ExtensionNesting8RunnableP" },
+      "pathComponents": ["Runnable"],
+      "accessLevel": "public",
+      "declarationFragments": [
+        { "kind": "keyword", "spelling": "protocol" },
+        { "kind": "text", "spelling": " " },
+        { "kind": "identifier", "spelling": "Runnable" }
+      ]
+    },
+    {
+      "kind": { "identifier": "swift.struct" },
+      "identifier": { "precise": "s:16ExtensionNesting5OuterV4ToolV" },
+      "pathComponents": ["Outer", "Tool"],
+      "accessLevel": "public",
+      "declarationFragments": [
+        { "kind": "keyword", "spelling": "struct" },
+        { "kind": "text", "spelling": " " },
+        { "kind": "identifier", "spelling": "Tool" }
+      ],
+      "swiftExtension": {
+        "extendedModule": "ExtensionNesting",
+        "typeKind": "swift.struct"
+      }
+    },
+    {
+      "kind": { "identifier": "swift.struct" },
+      "identifier": { "precise": "s:16ExtensionNesting5OuterV4ToolV5InputV" },
+      "pathComponents": ["Outer", "Tool", "Input"],
+      "accessLevel": "public",
+      "declarationFragments": [
+        { "kind": "keyword", "spelling": "struct" },
+        { "kind": "text", "spelling": " " },
+        { "kind": "identifier", "spelling": "Input" }
+      ]
+    },
+    {
+      "kind": { "identifier": "swift.init" },
+      "identifier": { "precise": "s:16ExtensionNesting5OuterV4ToolV5InputVACycfc" },
+      "pathComponents": ["Outer", "Tool", "Input", "init()"],
+      "accessLevel": "public",
+      "declarationFragments": [
+        { "kind": "keyword", "spelling": "init" },
+        { "kind": "text", "spelling": "()" }
+      ]
+    },
+    {
+      "kind": { "identifier": "swift.struct" },
+      "identifier": { "precise": "s:16ExtensionNesting5OuterV4ToolV6ResultV" },
+      "pathComponents": ["Outer", "Tool", "Result"],
+      "accessLevel": "public",
+      "declarationFragments": [
+        { "kind": "keyword", "spelling": "struct" },
+        { "kind": "text", "spelling": " " },
+        { "kind": "identifier", "spelling": "Result" }
+      ]
+    },
+    {
+      "kind": { "identifier": "swift.init" },
+      "identifier": { "precise": "s:16ExtensionNesting5OuterV4ToolV6ResultVACycfc" },
+      "pathComponents": ["Outer", "Tool", "Result", "init()"],
+      "accessLevel": "public",
+      "declarationFragments": [
+        { "kind": "keyword", "spelling": "init" },
+        { "kind": "text", "spelling": "()" }
+      ]
+    },
+    {
+      "kind": { "identifier": "swift.init" },
+      "identifier": { "precise": "s:16ExtensionNesting5OuterV4ToolVACycfc" },
+      "pathComponents": ["Outer", "Tool", "init()"],
+      "accessLevel": "public",
+      "declarationFragments": [
+        { "kind": "keyword", "spelling": "init" },
+        { "kind": "text", "spelling": "()" }
+      ]
+    },
+    {
+      "kind": { "identifier": "swift.method" },
+      "identifier": { "precise": "s:16ExtensionNesting5OuterV4ToolV7execute5inputAC6ResultVAE5InputV_tF" },
+      "pathComponents": ["Outer", "Tool", "execute(input:)"],
+      "accessLevel": "public",
+      "declarationFragments": [
+        { "kind": "keyword", "spelling": "func" },
+        { "kind": "text", "spelling": " " },
+        { "kind": "identifier", "spelling": "execute" },
+        { "kind": "text", "spelling": "(input: " },
+        { "kind": "typeIdentifier", "spelling": "Input" },
+        { "kind": "text", "spelling": ") -> " },
+        { "kind": "typeIdentifier", "spelling": "Result" }
+      ]
+    },
+    {
+      "kind": { "identifier": "swift.method" },
+      "identifier": { "precise": "s:16ExtensionNesting5OuterV4toolAC4ToolVyF" },
+      "pathComponents": ["Outer", "tool()"],
+      "accessLevel": "public",
+      "declarationFragments": [
+        { "kind": "keyword", "spelling": "func" },
+        { "kind": "text", "spelling": " " },
+        { "kind": "identifier", "spelling": "tool" },
+        { "kind": "text", "spelling": "() -> " },
+        { "kind": "typeIdentifier", "spelling": "Tool" }
+      ],
+      "swiftExtension": {
+        "extendedModule": "ExtensionNesting",
+        "typeKind": "swift.struct"
+      }
+    }
+  ],
+  "relationships": [
+    {
+      "kind": "conformsTo",
+      "source": "s:16ExtensionNesting5OuterV4ToolV",
+      "targetFallback": "Runnable"
+    }
+  ]
+}

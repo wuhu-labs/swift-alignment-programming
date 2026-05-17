@@ -58,15 +58,17 @@ public final class TypeNode {
     }
 }
 
-/// A group of extension members with the same header and availability.
+/// A group of extension declarations with the same header and availability.
 public struct ExtensionGroup {
     public let header: String
     public let availability: String?
+    public var types: [TypeNode]
     public var members: [String]
 
-    public init(header: String, availability: String?, members: [String]) {
+    public init(header: String, availability: String?, types: [TypeNode] = [], members: [String]) {
         self.header = header
         self.availability = availability
+        self.types = types
         self.members = members
     }
 }
