@@ -90,7 +90,7 @@ struct InterfaceCommand: ParsableCommand {
             try output.write(to: outputURL, atomically: true, encoding: .utf8)
             print("Wrote interface to \(outputURL.path)")
         } else {
-            print(output)
+            print(output, terminator: "")
         }
     }
 

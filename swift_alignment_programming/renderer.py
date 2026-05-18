@@ -86,6 +86,7 @@ class TypeNode:
 class ExtensionGroup:
     header: str
     availability: str | None
+    types: list[TypeNode] = field(default_factory=list)
     members: list[str] = field(default_factory=list)
 
 
@@ -334,6 +335,7 @@ def build_outline(symbol_graph_dir: pathlib.Path, module: str) -> ModuleOutline:
     module_outline = ModuleOutline(module=module)
     type_nodes: dict[str, TypeNode] = {}
     extension_groups: dict[tuple[str, str | None], ExtensionGroup] = {}
+    extension_type_groups: dict[str, tuple[str, str | None]] = {}
 
     kept_symbols: list[Symbol] = []
     for symbol in symbols:
@@ -344,7 +346,7 @@ def build_outline(symbol_graph_dir: pathlib.Path, module: str) -> ModuleOutline:
         kept_symbols.append(symbol)
 
     for symbol in kept_symbols:
-        if symbol.kind_id in CONTAINER_KIND_IDS and not symbol.swift_extension:
+        if symbol.kind_id in CONTAINER_KIND_IDS:
             conformance_names = [
                 normalize_conformance_name(target, precise_to_path, module)
                 for target in conformance_targets.get(symbol.precise_id, [])
@@ -360,16 +362,21 @@ def build_outline(symbol_graph_dir: pathlib.Path, module: str) -> ModuleOutline:
                 raw_type=raw_types.get(symbol.full_path),
             )
             type_nodes[symbol.full_path] = node
+            if symbol.swift_extension:
+                extension_type_groups[symbol.full_path] = (render_extension_header(symbol, module), symbol.availability)
 
     for node in type_nodes.values():
         parent = ".".join(node.path.split(".")[:-1]) if "." in node.path else None
         if parent and parent in type_nodes:
             type_nodes[parent].child_types.append(node)
+        elif node.path in extension_type_groups:
+            header, availability = extension_type_groups[node.path]
+            extension_groups.setdefault((header, availability), ExtensionGroup(header=header, availability=availability)).types.append(node)
         else:
             module_outline.types.append(node)
 
     for symbol in kept_symbols:
-        if symbol.kind_id in CONTAINER_KIND_IDS and not symbol.swift_extension:
+        if symbol.kind_id in CONTAINER_KIND_IDS:
             continue
 
         if symbol.swift_extension:
@@ -461,7 +468,16 @@ def render_outline(outline: ModuleOutline) -> str:
         if group.availability:
             section.append(group.availability)
         section.append(group.header)
-        section.extend(["  " + member for member in group.members])
+        children: list[str] = []
+        for type_node in sorted(group.types, key=type_sort_key):
+            if children:
+                children.append("")
+            children.extend(render_type(type_node, indent=2))
+        if group.members:
+            if children:
+                children.append("")
+            children.extend(["  " + member for member in group.members])
+        section.extend(children)
         section.append("}")
         sections.append(section)
 
