@@ -29,6 +29,22 @@ public struct ComplexityReport: Codable, Sendable, Equatable {
     }
 }
 
+public struct ComplexitySelection: Sendable, Equatable {
+    public var targets: Set<String>
+    public var paths: [String]
+    public var files: Set<String>
+
+    public init(targets: Set<String> = [], paths: [String] = [], files: Set<String> = []) {
+        self.targets = targets
+        self.paths = paths
+        self.files = files
+    }
+
+    public var isEmpty: Bool {
+        targets.isEmpty && paths.isEmpty && files.isEmpty
+    }
+}
+
 public struct ComplexitySummary: Codable, Sendable, Equatable {
     public var rawScore: Double
     public var weightedScore: Double
@@ -386,8 +402,18 @@ public struct ComplexityAnalyzer: Sendable {
     }
 
     public func analyze(root: URL) throws -> ComplexityReport {
+        try analyze(root: root, selection: ComplexitySelection())
+    }
+
+    public func analyze(root: URL, selection: ComplexitySelection) throws -> ComplexityReport {
         let root = root.standardizedFileURL
-        let targets = try sourceCollector.collect(in: root)
+        let targets = try sourceCollector.collect(in: root).compactMap { target -> ComplexitySourceTarget? in
+            guard selection.targets.isEmpty || selection.targets.contains(target.name) else { return nil }
+            let files = target.files.filter { complexitySelection(selection, contains: $0, root: root) }
+            guard !files.isEmpty else { return nil }
+            return ComplexitySourceTarget(name: target.name, sourceRoot: target.sourceRoot, files: files)
+        }
+        guard !targets.isEmpty else { throw ComplexityError.noSwiftSources(root.path) }
         let targetByFile = Dictionary(uniqueKeysWithValues: targets.flatMap { target in
             target.files.map { ($0, target) }
         })
@@ -444,6 +470,98 @@ public struct ComplexityAnalyzer: Sendable {
             lines: countLines(source)
         )
     }
+}
+
+public func filterComplexityReport(_ report: ComplexityReport, selection: ComplexitySelection) -> ComplexityReport {
+    guard !selection.isEmpty else { return report }
+    let root = URL(fileURLWithPath: report.root).standardizedFileURL
+    let files = report.files.filter { file in
+        guard selection.targets.isEmpty || selection.targets.contains(file.target) else { return false }
+        return complexitySelection(selection, contains: file.path, root: root)
+    }
+    let targets = report.targets.compactMap { target -> ComplexityTargetReport? in
+        let targetFiles = files.filter { $0.target == target.name }
+        guard !targetFiles.isEmpty else { return nil }
+        return ComplexityTargetReport(
+            name: target.name,
+            sourceRoot: target.sourceRoot,
+            rawScore: targetFiles.map(\.rawScore).reduce(0, +),
+            weightedScore: targetFiles.map(\.weightedScore).reduce(0, +),
+            files: targetFiles.count,
+            lines: targetFiles.map(\.lines).reduce(0, +)
+        )
+    }
+    let summary = ComplexitySummary(
+        rawScore: files.map(\.rawScore).reduce(0, +),
+        weightedScore: files.map(\.weightedScore).reduce(0, +),
+        targets: targets.count,
+        files: files.count,
+        lines: files.map(\.lines).reduce(0, +)
+    )
+    return ComplexityReport(
+        schemaVersion: report.schemaVersion,
+        root: report.root,
+        configuration: report.configuration,
+        summary: summary,
+        targets: targets,
+        files: files
+    )
+}
+
+public struct ComplexityDiffReport: Sendable, Equatable {
+    public var before: ComplexitySummary
+    public var after: ComplexitySummary
+    public var fileDeltas: [ComplexityFileDelta]
+
+    public var rawDelta: Double { after.rawScore - before.rawScore }
+    public var weightedDelta: Double { after.weightedScore - before.weightedScore }
+    public var lineDelta: Int { after.lines - before.lines }
+
+    public init(before: ComplexitySummary, after: ComplexitySummary, fileDeltas: [ComplexityFileDelta]) {
+        self.before = before
+        self.after = after
+        self.fileDeltas = fileDeltas
+    }
+}
+
+public struct ComplexityFileDelta: Sendable, Equatable, Identifiable {
+    public var id: String { path }
+    public var path: String
+    public var beforeWeightedScore: Double
+    public var afterWeightedScore: Double
+    public var beforeRawScore: Double
+    public var afterRawScore: Double
+    public var beforeLines: Int
+    public var afterLines: Int
+
+    public var weightedDelta: Double { afterWeightedScore - beforeWeightedScore }
+    public var rawDelta: Double { afterRawScore - beforeRawScore }
+    public var lineDelta: Int { afterLines - beforeLines }
+}
+
+public func diffComplexity(before: ComplexityReport, after: ComplexityReport) -> ComplexityDiffReport {
+    let beforeByPath = Dictionary(uniqueKeysWithValues: before.files.map { ($0.path, $0) })
+    let afterByPath = Dictionary(uniqueKeysWithValues: after.files.map { ($0.path, $0) })
+    let paths = Set(beforeByPath.keys).union(afterByPath.keys)
+    let fileDeltas = paths.map { path in
+        let beforeFile = beforeByPath[path]
+        let afterFile = afterByPath[path]
+        return ComplexityFileDelta(
+            path: path,
+            beforeWeightedScore: beforeFile?.weightedScore ?? 0,
+            afterWeightedScore: afterFile?.weightedScore ?? 0,
+            beforeRawScore: beforeFile?.rawScore ?? 0,
+            afterRawScore: afterFile?.rawScore ?? 0,
+            beforeLines: beforeFile?.lines ?? 0,
+            afterLines: afterFile?.lines ?? 0
+        )
+    }.sorted { lhs, rhs in
+        let lhsMagnitude = abs(lhs.weightedDelta)
+        let rhsMagnitude = abs(rhs.weightedDelta)
+        if lhsMagnitude == rhsMagnitude { return lhs.path < rhs.path }
+        return lhsMagnitude > rhsMagnitude
+    }
+    return ComplexityDiffReport(before: before.summary, after: after.summary, fileDeltas: fileDeltas)
 }
 
 private final class ComplexitySyntaxVisitor: SyntaxVisitor {
@@ -912,4 +1030,27 @@ private func relativePath(from root: URL, to file: URL) -> String {
         return String(filePath.dropFirst(rootPath.count + 1))
     }
     return filePath
+}
+
+private func complexitySelection(_ selection: ComplexitySelection, contains path: String, root: URL) -> Bool {
+    guard !selection.paths.isEmpty || !selection.files.isEmpty else { return true }
+    let normalizedPath = normalizeComplexityPath(path, root: root)
+    if selection.files.contains(normalizedPath) { return true }
+    return selection.paths.contains { filter in
+        let normalizedFilter = normalizeComplexityPath(filter, root: root)
+        return normalizedPath == normalizedFilter || normalizedPath.hasPrefix(normalizedFilter + "/")
+    }
+}
+
+private func normalizeComplexityPath(_ path: String, root: URL) -> String {
+    let expanded = (path as NSString).expandingTildeInPath
+    let standardized = URL(fileURLWithPath: expanded).standardizedFileURL.path
+    let rootPath = root.standardizedFileURL.path
+    if standardized == rootPath { return "" }
+    if standardized.hasPrefix(rootPath + "/") {
+        return String(standardized.dropFirst(rootPath.count + 1))
+    }
+    return path
+        .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        .replacingOccurrences(of: "^\\./", with: "", options: .regularExpression)
 }

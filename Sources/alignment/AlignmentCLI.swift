@@ -13,6 +13,7 @@ struct AlignmentCLI: AsyncParsableCommand {
             DashboardCommand.self,
             ComplexityCommand.self,
             ComplexitySummaryCommand.self,
+            ComplexityDiffCommand.self,
             ComplexityDashboardCommand.self,
             ContractsCommand.self,
         ]
@@ -737,9 +738,18 @@ struct ComplexityCommand: ParsableCommand {
     @Option(help: "Write JSON report to file instead of stdout")
     var output: String?
 
+    @Option(help: "Limit analysis to a target. Can be passed multiple times.")
+    var target: [String] = []
+
+    @Option(help: "Limit analysis to a root-relative file or directory path. Can be passed multiple times.")
+    var path: [String] = []
+
+    @Option(help: "Limit analysis to a root-relative file path. Can be passed multiple times.")
+    var file: [String] = []
+
     func run() throws {
         let rootURL = URL(fileURLWithPath: root).standardizedFileURL
-        let report = try ComplexityAnalyzer().analyze(root: rootURL)
+        let report = try ComplexityAnalyzer().analyze(root: rootURL, selection: complexitySelection(targets: target, paths: path, files: file))
         let data = try complexityJSONEncoder().encode(report)
         if let output {
             let outputURL = URL(fileURLWithPath: output).standardizedFileURL
@@ -771,14 +781,68 @@ struct ComplexitySummaryCommand: ParsableCommand {
     @Option(help: "Maximum number of top-level rows to show")
     var top: Int = 40
 
+    @Option(help: "Limit summary to a target. Can be passed multiple times.")
+    var target: [String] = []
+
+    @Option(help: "Limit summary to a root-relative file or directory path. Can be passed multiple times.")
+    var path: [String] = []
+
+    @Option(help: "Limit summary to a root-relative file path. Can be passed multiple times.")
+    var file: [String] = []
+
     func validate() throws {
         guard top > 0 else { throw ValidationError("--top must be greater than zero") }
     }
 
     func run() throws {
         let inputURL = URL(fileURLWithPath: input).standardizedFileURL
-        let report = try readComplexityReport(inputURL)
+        let report = filterComplexityReport(try readComplexityReport(inputURL), selection: complexitySelection(targets: target, paths: path, files: file))
         print(ComplexitySummaryRenderer().render(report: report, grouping: by, top: top), terminator: "")
+    }
+}
+
+// MARK: - alignment complexity-diff
+
+struct ComplexityDiffCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "complexity-diff",
+        abstract: "Compare two complexity JSON reports"
+    )
+
+    @Option(help: "Path to the baseline complexity JSON")
+    var before: String
+
+    @Option(help: "Path to the new complexity JSON")
+    var after: String
+
+    @Option(help: "Limit diff to a target. Can be passed multiple times.")
+    var target: [String] = []
+
+    @Option(help: "Limit diff to a root-relative file or directory path. Can be passed multiple times.")
+    var path: [String] = []
+
+    @Option(help: "Limit diff to a root-relative file path. Can be passed multiple times.")
+    var file: [String] = []
+
+    @Option(help: "Maximum changed files to show")
+    var top: Int = 20
+
+    @Flag(help: "Exit nonzero unless weighted complexity decreases")
+    var mustDecrease: Bool = false
+
+    func validate() throws {
+        guard top > 0 else { throw ValidationError("--top must be greater than zero") }
+    }
+
+    func run() throws {
+        let selection = complexitySelection(targets: target, paths: path, files: file)
+        let beforeReport = filterComplexityReport(try readComplexityReport(URL(fileURLWithPath: before).standardizedFileURL), selection: selection)
+        let afterReport = filterComplexityReport(try readComplexityReport(URL(fileURLWithPath: after).standardizedFileURL), selection: selection)
+        let diff = diffComplexity(before: beforeReport, after: afterReport)
+        print(renderComplexityDiff(diff, top: top), terminator: "")
+        if mustDecrease && diff.weightedDelta >= 0 {
+            throw ExitCode.failure
+        }
     }
 }
 
@@ -802,10 +866,19 @@ struct ComplexityDashboardCommand: ParsableCommand {
     @Flag(help: "Skip opening the dashboard in browser")
     var noOpen: Bool = false
 
+    @Option(help: "Limit dashboard to a target. Can be passed multiple times.")
+    var target: [String] = []
+
+    @Option(help: "Limit dashboard to a root-relative file or directory path. Can be passed multiple times.")
+    var path: [String] = []
+
+    @Option(help: "Limit dashboard to a root-relative file path. Can be passed multiple times.")
+    var file: [String] = []
+
     func run() throws {
         let inputURL = URL(fileURLWithPath: input).standardizedFileURL
         let outputURL = URL(fileURLWithPath: outputDir).standardizedFileURL
-        let report = try readComplexityReport(inputURL)
+        let report = filterComplexityReport(try readComplexityReport(inputURL), selection: complexitySelection(targets: target, paths: path, files: file))
         let pageTitle = title ?? URL(fileURLWithPath: report.root).lastPathComponent
         let html = try ComplexityDashboardHTMLGenerator().generate(report: report, title: pageTitle)
 
@@ -837,6 +910,52 @@ private func complexityJSONDecoder() -> JSONDecoder {
     let decoder = JSONDecoder()
     decoder.keyDecodingStrategy = .convertFromSnakeCase
     return decoder
+}
+
+private func complexitySelection(targets: [String], paths: [String], files: [String]) -> ComplexitySelection {
+    ComplexitySelection(
+        targets: Set(targets.filter { !$0.isEmpty }),
+        paths: paths.filter { !$0.isEmpty },
+        files: Set(files.filter { !$0.isEmpty })
+    )
+}
+
+private func renderComplexityDiff(_ diff: ComplexityDiffReport, top: Int) -> String {
+    var lines = [
+        "Complexity diff",
+        "===============",
+        "weighted \(formatComplexity(diff.before.weightedScore)) -> \(formatComplexity(diff.after.weightedScore)) (\(signedComplexity(diff.weightedDelta)))",
+        "raw      \(formatComplexity(diff.before.rawScore)) -> \(formatComplexity(diff.after.rawScore)) (\(signedComplexity(diff.rawDelta)))",
+        "lines    \(diff.before.lines) -> \(diff.after.lines) (\(signedInt(diff.lineDelta)))",
+        "files    \(diff.before.files) -> \(diff.after.files) (\(signedInt(diff.after.files - diff.before.files)))",
+        "",
+    ]
+
+    let changed = diff.fileDeltas.filter { $0.weightedDelta != 0 || $0.rawDelta != 0 || $0.lineDelta != 0 }.prefix(top)
+    if changed.isEmpty {
+        lines.append("No file-level complexity changes.")
+    } else {
+        lines.append("Changed files:")
+        for file in changed {
+            lines.append("  \(signedComplexity(file.weightedDelta)) weighted, \(signedComplexity(file.rawDelta)) raw, \(signedInt(file.lineDelta)) lines  \(file.path)")
+        }
+    }
+    lines.append("")
+    return lines.joined(separator: "\n")
+}
+
+private func formatComplexity(_ value: Double) -> String {
+    String(format: "%.1f", value)
+}
+
+private func signedComplexity(_ value: Double) -> String {
+    let sign = value >= 0 ? "+" : ""
+    return "\(sign)\(formatComplexity(value))"
+}
+
+private func signedInt(_ value: Int) -> String {
+    let sign = value >= 0 ? "+" : ""
+    return "\(sign)\(value)"
 }
 
 private func readComplexityReport(_ url: URL) throws -> ComplexityReport {
