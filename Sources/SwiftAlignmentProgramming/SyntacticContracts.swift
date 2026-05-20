@@ -25,6 +25,7 @@ public struct ContractSymbol: Codable, Sendable, Equatable, Identifiable {
     public var declaration: String
     public var parentKey: String?
     public var extendedType: String?
+    public var inheritedTypes: [String]?
     public var isExtensionMember: Bool
 
     public init(
@@ -35,6 +36,7 @@ public struct ContractSymbol: Codable, Sendable, Equatable, Identifiable {
         declaration: String,
         parentKey: String? = nil,
         extendedType: String? = nil,
+        inheritedTypes: [String]? = nil,
         isExtensionMember: Bool = false
     ) {
         self.key = key
@@ -44,6 +46,7 @@ public struct ContractSymbol: Codable, Sendable, Equatable, Identifiable {
         self.declaration = declaration
         self.parentKey = parentKey
         self.extendedType = extendedType
+        self.inheritedTypes = inheritedTypes
         self.isExtensionMember = isExtensionMember
     }
 }
@@ -133,10 +136,11 @@ private struct ContractContext {
     var kind: String?
     var isExtension: Bool
     var extendedType: String?
+    var symbolKey: String?
 
     var parentKey: String? {
         guard let kind, let name else { return nil }
-        if kind == "extension" { return "extension \(name)" }
+        if kind == "extension" { return symbolKey ?? "extension \(name)" }
         return "type \(path.joined(separator: "."))"
     }
 }
@@ -153,7 +157,8 @@ private final class ContractSyntaxVisitor: SyntaxVisitor {
             defaultAccess: "internal",
             kind: nil,
             isExtension: false,
-            extendedType: nil
+            extendedType: nil,
+            symbolKey: nil
         ),
     ]
     var symbols: [ContractSymbol] = []
@@ -216,17 +221,22 @@ private final class ContractSyntaxVisitor: SyntaxVisitor {
         let effective = declared.map { effectiveAccess($0, inside: inherited) } ?? inherited
         let extendedType = node.extendedType.trimmedDescription
         let defaultAccess = declared ?? "internal"
+        let inheritedTypes = node.inheritanceClause?.inheritedTypes.map { $0.type.trimmedDescription } ?? []
+        let inheritanceClause = node.inheritanceClause?.trimmedDescription ?? ""
         let whereClause = node.genericWhereClause.map { " " + $0.trimmedDescription } ?? ""
-        let declaration = "\(attributesText(node.attributes))\(modifiersText(node.modifiers))extension \(extendedType)\(whereClause)"
+        let signature = "\(extendedType)\(inheritanceClause)\(whereClause)"
+        let key = "extension \(signature)"
+        let declaration = "\(attributesText(node.attributes))\(modifiersText(node.modifiers))extension \(signature)"
 
         if isVisible(effective) {
             symbols.append(ContractSymbol(
-                key: "extension \(extendedType)\(whereClause)",
+                key: key,
                 kind: "extension",
                 access: effective,
                 path: [extendedType],
                 declaration: normalizeDeclaration(declaration),
-                extendedType: extendedType
+                extendedType: extendedType,
+                inheritedTypes: inheritedTypes.isEmpty ? nil : inheritedTypes
             ))
         }
 
@@ -237,7 +247,8 @@ private final class ContractSyntaxVisitor: SyntaxVisitor {
             defaultAccess: defaultAccess,
             kind: "extension",
             isExtension: true,
-            extendedType: extendedType
+            extendedType: extendedType,
+            symbolKey: key
         ))
         return .visitChildren
     }
@@ -356,7 +367,8 @@ private final class ContractSyntaxVisitor: SyntaxVisitor {
             defaultAccess: childDefault,
             kind: kind,
             isExtension: false,
-            extendedType: nil
+            extendedType: nil,
+            symbolKey: nil
         ))
         return .visitChildren
     }
@@ -427,7 +439,7 @@ public struct ContractRenderer: Sendable {
             sections.append(Array(renderedTypes))
         }
 
-        for ext in tree.externalExtensions.sorted(by: compareSymbols) {
+        for ext in tree.renderedExtensions.sorted(by: compareSymbols) {
             var section = [ext.declaration + " {"]
             let members = tree.children(of: ext.key)
                 .sorted(by: compareSymbols)
@@ -506,10 +518,10 @@ private struct ContractTree {
         }
     }
 
-    var externalExtensions: [ContractSymbol] {
+    var renderedExtensions: [ContractSymbol] {
         byKey.values.filter { symbol in
             guard symbol.kind == "extension", let extended = symbol.extendedType else { return false }
-            return !isLocalType(extended)
+            return hasConformance(symbol) || (!isLocalType(extended) && !children(of: symbol.key).isEmpty)
         }
     }
 
@@ -529,6 +541,10 @@ private struct ContractTree {
 
     private func isLocalType(_ type: String) -> Bool {
         localTypeKeys.contains("type \(type)") || localTypeNames.contains(type)
+    }
+
+    private func hasConformance(_ symbol: ContractSymbol) -> Bool {
+        !(symbol.inheritedTypes ?? []).isEmpty
     }
 }
 

@@ -43,6 +43,12 @@ import Testing
       func externalThing() {}
     }
 
+    extension Client: Sendable {}
+
+    extension URL: Sendable {}
+
+    extension Int {}
+
     #if os(macOS)
     public struct MacOnly {}
     #else
@@ -65,6 +71,8 @@ import Testing
     #expect(keys.contains("func Client.reset()"))
     #expect(keys.contains("func Client.ping(value:)"))
     #expect(keys.contains("func String.externalThing()"))
+    #expect(keys.contains("extension Client: Sendable"))
+    #expect(keys.contains("extension URL: Sendable"))
     #expect(keys.contains("type MacOnly"))
     #expect(keys.contains("type LinuxOnly"))
     #expect(!module.symbols.contains { $0.declaration.contains("#Preview") })
@@ -74,8 +82,11 @@ import Testing
     #expect(rendered.contains("@Wrapped public var token: String"))
     #expect(rendered.contains("package struct Configuration {"))
     #expect(rendered.contains("public func reset()"))
+    #expect(rendered.contains("extension Client: Sendable {"))
     #expect(rendered.contains("public extension String {"))
     #expect(rendered.contains("func externalThing()"))
+    #expect(rendered.contains("extension URL: Sendable {"))
+    #expect(!rendered.contains("extension Int {"))
 }
 
 @Test func syntacticContractsRejectVisibleStoredPropertiesWithInferredTypes() throws {
