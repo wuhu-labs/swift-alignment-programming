@@ -78,6 +78,53 @@ import Testing
     ])
 }
 
+@Test func complexityAnalyzerFiltersByTargetAndPath() throws {
+    let root = try TemporaryDirectory()
+    try root.write("Targets/App/Sources/Core/Main.swift", "public struct Main { var count = 0 }\n")
+    try root.write("Targets/App/Sources/VFS/Store.swift", "final class Store { var files: [String: String] = [:] }\n")
+    try root.write("Targets/Tool/Sources/Tool.swift", "public struct Tool {}\n")
+
+    let report = try ComplexityAnalyzer().analyze(
+        root: root.url,
+        selection: ComplexitySelection(
+            targets: ["App"],
+            paths: ["Targets/App/Sources/VFS"]
+        )
+    )
+
+    #expect(report.summary.targets == 1)
+    #expect(report.summary.files == 1)
+    #expect(report.targets.map(\.name) == ["App"])
+    #expect(report.files.map(\.path) == ["Targets/App/Sources/VFS/Store.swift"])
+}
+
+@Test func complexityReportFilteringAndDiffingUseFileGranularity() throws {
+    let before = ComplexityReport(
+        root: "/tmp/Demo",
+        configuration: ComplexityMetricConfiguration(),
+        summary: ComplexitySummary(rawScore: 12, weightedScore: 30, targets: 1, files: 2, lines: 30),
+        targets: [
+            ComplexityTargetReport(name: "Demo", sourceRoot: "Targets/Demo/Sources", rawScore: 12, weightedScore: 30, files: 2, lines: 30),
+        ],
+        files: [
+            ComplexityFileReport(path: "Targets/Demo/Sources/A.swift", target: "Demo", rawScore: 10, weightedScore: 25, lines: 20, declarations: [], lineComplexity: []),
+            ComplexityFileReport(path: "Targets/Demo/Sources/B.swift", target: "Demo", rawScore: 2, weightedScore: 5, lines: 10, declarations: [], lineComplexity: []),
+        ]
+    )
+    var after = before
+    after.files[0] = ComplexityFileReport(path: "Targets/Demo/Sources/A.swift", target: "Demo", rawScore: 6, weightedScore: 12, lines: 16, declarations: [], lineComplexity: [])
+    after = filterComplexityReport(after, selection: ComplexitySelection(paths: ["Targets/Demo/Sources/A.swift"]))
+    let filteredBefore = filterComplexityReport(before, selection: ComplexitySelection(paths: ["Targets/Demo/Sources/A.swift"]))
+
+    let diff = diffComplexity(before: filteredBefore, after: after)
+
+    #expect(filteredBefore.summary.files == 1)
+    #expect(diff.weightedDelta == -13)
+    #expect(diff.rawDelta == -4)
+    #expect(diff.lineDelta == -4)
+    #expect(diff.fileDeltas.map(\.path) == ["Targets/Demo/Sources/A.swift"])
+}
+
 @Test func complexityVisualizationRendersTreeAndDashboard() throws {
     let report = ComplexityReport(
         root: "/tmp/Demo",

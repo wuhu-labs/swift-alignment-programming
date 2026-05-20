@@ -70,12 +70,28 @@ path rather than test-file naming conventions.
 # Write a detailed JSON report with per-file and sparse per-line complexity
 alignment complexity --root /path/to/package --output complexity.json
 
+# Limit the scan to one target, folder, or file
+alignment complexity --root /path/to/package \
+  --target ServerDependencies \
+  --path Targets/ServerDependencies/Sources/FileIO \
+  --output fileio-complexity.json
+
 # Print target or file summaries from the JSON
 alignment complexity-summary --input complexity.json --by target
 alignment complexity-summary --input complexity.json --by file --top 50
+alignment complexity-summary --input complexity.json \
+  --by file \
+  --path Targets/ServerDependencies/Sources/FileIO
 
 # Print an ASCII tree: target → folders → files
 alignment complexity-summary --input complexity.json --by tree
+
+# Compare before/after reports and fail unless weighted complexity decreases
+alignment complexity-diff \
+  --before before.json \
+  --after after.json \
+  --path Targets/ServerDependencies/Sources/FileIO \
+  --must-decrease
 
 # Generate an HTML dashboard with target/file tables and a treemap
 alignment complexity-dashboard \
