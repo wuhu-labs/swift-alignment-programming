@@ -14,6 +14,7 @@ struct AlignmentCLI: AsyncParsableCommand {
             ComplexityCommand.self,
             ComplexitySummaryCommand.self,
             ComplexityDashboardCommand.self,
+            ContractsCommand.self,
         ]
     )
 }
@@ -131,6 +132,209 @@ struct InterfaceCommand: ParsableCommand {
         }
         print("Interfaces: \(successCount) generated, \(skipCount) skipped → \(outputDirURL.path)")
     }
+}
+
+// MARK: - alignment contracts
+
+struct ContractsCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "contracts",
+        abstract: "Generate and guard fast SwiftSyntax-based contract interfaces"
+    )
+
+    @Option(help: "SwiftPM target name. If omitted, generates contracts for all non-test targets.")
+    var target: String?
+
+    @Option(help: "Path to the Swift package root (defaults to current directory)")
+    var packagePath: String = "."
+
+    @Option(help: "Contract access scope as comma-separated levels (default: open,public,package)")
+    var access: String = "open,public,package"
+
+    @Option(name: .customLong("json"), help: "Write JSON IR to this file (single target) or directory (all targets)")
+    var jsonOutput: String?
+
+    @Option(name: .customLong("render"), help: "Write rendered pseudo-Swift to this file (single target) or directory (all targets)")
+    var renderOutput: String?
+
+    @Option(help: "Include glob. Can be passed multiple times.")
+    var include: [String] = []
+
+    @Option(help: "Exclude glob. Can be passed multiple times.")
+    var exclude: [String] = []
+
+    @Flag(name: .customLong("no-gitignore"), help: "Do not filter files using .gitignore")
+    var noGitIgnore: Bool = false
+
+    @Option(help: "Compare the current checkout against this git ref")
+    var against: String?
+
+    @Flag(help: "Fail if the diff adds public/package/open API")
+    var noAdditions: Bool = false
+
+    @Flag(help: "Fail if the diff removes public/package/open API")
+    var noRemovals: Bool = false
+
+    @Flag(help: "Fail if any existing contract declaration changes")
+    var noChanges: Bool = false
+
+    func run() throws {
+        let root = URL(fileURLWithPath: packagePath).standardizedFileURL
+        let configuration = try contractConfiguration()
+        let collector = ContractSourceCollector(configuration: configuration)
+        let targets = try selectTargets(try collector.collect(in: root))
+        let renderer = ContractRenderer()
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+
+        if let against {
+            var failed = false
+            for target in targets {
+                let current = try loadContractModule(root: root, target: target, configuration: configuration)
+                let baseline = try loadContractModuleFromGitRef(root: root, target: target, ref: against, configuration: configuration)
+                let diff = diffContracts(old: baseline, new: current)
+                print("## \(target.name)")
+                print(renderContractDiff(diff), terminator: "")
+                if noAdditions && !diff.added.isEmpty { failed = true }
+                if noRemovals && !diff.removed.isEmpty { failed = true }
+                if noChanges && !diff.changed.isEmpty { failed = true }
+            }
+            if failed { throw ExitCode.failure }
+            return
+        }
+
+        let defaultDir = root.appendingPathComponent(".build").appendingPathComponent("contracts")
+        let jsonBase = jsonOutput.map { URL(fileURLWithPath: $0).standardizedFileURL }
+        let renderBase = renderOutput.map { URL(fileURLWithPath: $0).standardizedFileURL }
+
+        for selectedTarget in targets {
+            let module = try loadContractModule(root: root, target: selectedTarget, configuration: configuration)
+            let rendered = renderer.render(module)
+            if let jsonURL = outputURL(base: jsonBase, defaultDir: defaultDir, target: selectedTarget.name, extension: "contract.json", single: targets.count == 1) {
+                try FileManager.default.createDirectory(at: jsonURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try encoder.encode(module).write(to: jsonURL)
+                print("Wrote contract JSON to \(jsonURL.path)")
+            }
+            if let renderURL = outputURL(base: renderBase, defaultDir: defaultDir, target: selectedTarget.name, extension: "swift", single: targets.count == 1) {
+                try FileManager.default.createDirectory(at: renderURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try rendered.write(to: renderURL, atomically: true, encoding: .utf8)
+                print("Wrote contract interface to \(renderURL.path)")
+            }
+            if jsonOutput == nil && renderOutput == nil {
+                if targets.count > 1 {
+                    let renderURL = defaultDir.appendingPathComponent("\(selectedTarget.name).swift")
+                    try FileManager.default.createDirectory(at: renderURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    try rendered.write(to: renderURL, atomically: true, encoding: .utf8)
+                    let jsonURL = defaultDir.appendingPathComponent("\(selectedTarget.name).contract.json")
+                    try encoder.encode(module).write(to: jsonURL)
+                    print("  \(selectedTarget.name) -> \(renderURL.path)")
+                } else {
+                    print(rendered, terminator: "")
+                }
+            }
+        }
+    }
+
+    private func contractConfiguration() throws -> ContractConfiguration {
+        let levels = Set(access.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) })
+        let valid: Set<String> = ["open", "public", "package", "internal", "fileprivate", "private"]
+        for level in levels where !valid.contains(level) {
+            throw ValidationError(ContractError.invalidAccess(level).description)
+        }
+        return ContractConfiguration(
+            accessLevels: levels,
+            includeGlobs: include,
+            excludeGlobs: exclude,
+            respectGitIgnore: !noGitIgnore
+        )
+    }
+
+    private func selectTargets(_ targets: [ContractSourceTarget]) throws -> [ContractSourceTarget] {
+        guard let target else { return targets }
+        guard let selected = targets.first(where: { $0.name == target }) else {
+            throw ValidationError(ContractError.targetNotFound(target).description)
+        }
+        return [selected]
+    }
+
+    private func outputURL(base: URL?, defaultDir: URL, target: String, extension ext: String, single: Bool) -> URL? {
+        guard let base else { return nil }
+        if single && !base.hasDirectoryPath && base.pathExtension != "" {
+            return base
+        }
+        return base.appendingPathComponent("\(target).\(ext)")
+    }
+}
+
+private func loadContractModuleFromGitRef(
+    root: URL,
+    target: ContractSourceTarget,
+    ref: String,
+    configuration: ContractConfiguration
+) throws -> ContractModule {
+    let filePaths = try gitTrackedSwiftFiles(root: root, ref: ref, sourceRoot: target.sourceRoot)
+        .filter { matchesContractCLIPath($0, include: configuration.includeGlobs, exclude: configuration.excludeGlobs) }
+    let files: [(path: String, source: String)] = try filePaths.compactMap { path in
+        guard let source = try gitShow(root: root, ref: ref, path: path) else { return nil }
+        return (path, source)
+    }
+    return try ContractExtractor(configuration: configuration).extractModule(module: target.name, files: files)
+}
+
+private func gitTrackedSwiftFiles(root: URL, ref: String, sourceRoot: String) throws -> [String] {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+    process.arguments = ["-C", root.path, "ls-tree", "-r", "--name-only", ref, "--", sourceRoot]
+    let output = Pipe()
+    let error = Pipe()
+    process.standardOutput = output
+    process.standardError = error
+    try process.run()
+    process.waitUntilExit()
+    guard process.terminationStatus == 0 else {
+        let message = String(data: error.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "git ls-tree failed"
+        throw ValidationError(message)
+    }
+    let text = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    return text.split(separator: "\n").map(String.init).filter { $0.hasSuffix(".swift") }
+}
+
+private func gitShow(root: URL, ref: String, path: String) throws -> String? {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+    process.arguments = ["-C", root.path, "show", "\(ref):\(path)"]
+    let output = Pipe()
+    let error = Pipe()
+    process.standardOutput = output
+    process.standardError = error
+    try process.run()
+    process.waitUntilExit()
+    guard process.terminationStatus == 0 else { return nil }
+    return String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)
+}
+
+private func matchesContractCLIPath(_ path: String, include: [String], exclude: [String]) -> Bool {
+    let included = include.isEmpty || include.contains { cliGlobMatches($0, path) }
+    let excluded = exclude.contains { cliGlobMatches($0, path) }
+    return included && !excluded
+}
+
+private func cliGlobMatches(_ pattern: String, _ path: String) -> Bool {
+    var regex = "^"
+    for character in pattern {
+        switch character {
+        case "*":
+            regex += ".*"
+        case "?":
+            regex += "."
+        case ".", "+", "(", ")", "[", "]", "{", "}", "^", "$", "|", "\\":
+            regex += "\\\(character)"
+        default:
+            regex.append(character)
+        }
+    }
+    regex += "$"
+    return path.range(of: regex, options: .regularExpression) != nil
 }
 
 // MARK: - Symbol Graph Building

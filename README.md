@@ -89,6 +89,34 @@ Swift maintenance cost: broader access (`public`, `package`, `internal`,
 `fileprivate`, `private`), reference/concurrency types (`class`, `final class`,
 `actor`), mutable/stored properties, and `async`/`throws` methods.
 
+### `alignment contracts`
+
+Generate fast SwiftSyntax-based contract interfaces without running
+`swift build`, macro expansion, build plugins, or symbol graph emission.
+
+```bash
+# Print the rendered contract for one target
+alignment contracts --target MyTarget
+
+# Write JSON IR and rendered pseudo-Swift
+alignment contracts \
+  --target MyTarget \
+  --json .build/contracts/MyTarget.contract.json \
+  --render .build/contracts/MyTarget.swift
+
+# Generate all package targets into .build/contracts/
+alignment contracts --package-path /path/to/package
+
+# Compare the current checkout against a git ref and reject added API
+alignment contracts --target MyTarget --against main --no-additions
+```
+
+The default access scope is `open,public,package`. Source discovery uses SwiftPM
+metadata when available, falls back to `Targets/<target>/Sources`, respects
+`.gitignore` by default, and supports repeated `--include` / `--exclude` globs.
+Contract-visible stored properties and constants must have explicit type
+annotations; inferred stored types fail generation with a diagnostic.
+
 ## Monorepo CI recipe
 
 ```bash
