@@ -318,7 +318,8 @@ private final class ContractSyntaxVisitor: SyntaxVisitor {
     }
 
     override func visit(_ node: EnumCaseDeclSyntax) -> SyntaxVisitorContinueKind {
-        let access = effectiveAccess(declaredAccess(node.modifiers) ?? current.defaultAccess, inside: current.effectiveAccess)
+        let defaultAccess = current.kind == "enum" ? current.effectiveAccess : current.defaultAccess
+        let access = effectiveAccess(declaredAccess(node.modifiers) ?? defaultAccess, inside: current.effectiveAccess)
         guard isVisible(access) else { return .skipChildren }
         for element in node.elements {
             let name = element.name.text
@@ -347,7 +348,7 @@ private final class ContractSyntaxVisitor: SyntaxVisitor {
                 parentKey: current.isExtension ? "extension \(current.extendedType ?? "")" : current.parentKey
             ))
         }
-        let childDefault = (kind == "protocol" || kind == "enum") ? access : "internal"
+        let childDefault = kind == "protocol" ? access : "internal"
         contexts.append(ContractContext(
             name: name,
             path: path,

@@ -157,7 +157,7 @@ Expose the fast path through the CLI without invoking the build system.
 Possible command shape:
 
 ```bash
-alignment contract --target Foo --access open,public,package \
+alignment contracts --target Foo --access open,public,package \
   --json .build/contracts/Foo.contract.json \
   --render .build/contracts/Foo.swift
 ```
@@ -177,7 +177,7 @@ Make the tool directly useful to agents.
 Possible command shape:
 
 ```bash
-alignment contract-guard --against main --access open,public,package --no-additions
+alignment contracts --against main --access open,public,package --no-additions
 ```
 
 Acceptance criteria:

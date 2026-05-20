@@ -90,6 +90,25 @@ import Testing
     }
 }
 
+@Test func syntacticContractsUseSwiftEnumDefaultAccessRules() throws {
+    let source = """
+    public enum Mode {
+      case enabled
+      case disabled(Int)
+      static let hidden = "hidden"
+      public static let visible: String = "visible"
+    }
+    """
+
+    let module = try ContractExtractor().extractModule(module: "Demo", files: [("Demo.swift", source)])
+    let keys = Set(module.symbols.map(\.key))
+
+    #expect(keys.contains("case Mode.enabled"))
+    #expect(keys.contains("case Mode.disabled"))
+    #expect(keys.contains("var Mode.visible"))
+    #expect(!keys.contains("var Mode.hidden"))
+}
+
 @Test func contractDiffReportsAddedRemovedAndChangedSymbols() {
     let old = ContractModule(module: "Demo", symbols: [
         ContractSymbol(key: "type Client", kind: "struct", access: "public", path: ["Client"], declaration: "public struct Client"),

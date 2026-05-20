@@ -69,6 +69,35 @@ types for contract-visible stored properties/constants:
 | WuhuAppKit | ServerEmbeddedApp | `Targets/ServerEmbeddedApp/Sources/AppDelegate.swift: let updater` |
 | WuhuAppKit | MarkdownKit | `Targets/MarkdownKit/Sources/MarkdownDocumentComponent.swift: let default` |
 
+## Current Wuhu Main Follow-up
+
+After the initial comparison, Wuhu PR
+<https://github.com/wuhu-labs/wuhu-app/pull/389> added explicit type
+annotations for the contract-visible stored values above and documented the
+SwiftGen local build step in Wuhu's `AGENTS.md`.
+
+Verification against `wuhu-app@2d8000a` generated syntactic contracts
+successfully for every non-test target in both packages:
+
+```bash
+.build/debug/alignment contracts \
+  --package-path ~/Developer/wuhu-app/Packages/WuhuCoreKit \
+  --render /tmp/wuhu-contracts-current/WuhuCoreKit \
+  --json /tmp/wuhu-contracts-json-current/WuhuCoreKit
+
+.build/debug/alignment contracts \
+  --package-path ~/Developer/wuhu-app/Packages/WuhuAppKit \
+  --render /tmp/wuhu-contracts-current/WuhuAppKit \
+  --json /tmp/wuhu-contracts-json-current/WuhuAppKit
+```
+
+Generated target coverage:
+
+| Package | Targets |
+| --- | --- |
+| WuhuCoreKit | SQLiteMigrations, ServeExtras, ServerDependencies, ServerLibraryFeature, ServerMessageBusFeature, ServerSessionFeature, ServerTimerFeature, ToolExecution, WorkspaceContracts, WorkspaceEngine, WorkspaceScanner, WuhuAI, WuhuAPI, WuhuCLIKit, WuhuClient, WuhuCore, WuhuRunner, WuhuServer, wuhu |
+| WuhuAppKit | App, CanopyKit, DocFeatureKit, MarkdownKit, ServerEmbeddedApp, SessionFeatureKit, WuhuShared |
+
 ## Declaration Overlap Report
 
 This table compares normalized declaration text from generated syntactic
@@ -108,6 +137,8 @@ even when the API is explainably represented.
 
 - The exact-match table is intentionally conservative and should be replaced by
   symbol-key comparison once the symbol-graph renderer also exposes stable keys.
-- Several Wuhu targets need explicit annotations on public/package stored
-  constants before syntactic generation can complete. This is expected Phase 1
-  behavior, not a parser failure.
+- At the original `dd59fcdd21d9e32be2d7223047838c743bcdb5f4` checkout, several
+  Wuhu targets needed explicit annotations on public/package stored constants
+  before syntactic generation could complete. This was expected Phase 1
+  behavior, not a parser failure, and has since been validated on current Wuhu
+  `main`.
